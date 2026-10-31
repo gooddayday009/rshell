@@ -1,0 +1,33 @@
+[package]
+name = "rshell-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+sha2 = "0.11"
+tempfile = "3"
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+russh = { version = "0.65", default-features = false, features = ["ring", "rsa"] }
+zeroize = "1"
+rand = "0.10"
+russh-sftp = "3.0.1"
+zmodem2 = "0.7.3"
+portable-pty = "0.9"
+socket2 = "0.6"
+serialport = { version = "4", default-features = false }
+zip = { version = "2.4", default-features = false, features = ["deflate"] }
+encoding_rs = "0.8"
+time = { version = "0.3", features = ["parsing"] }
+reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls", "cookies"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_Security_Credentials", "Win32_System_JobObjects", "Win32_System_Threading"] }
+
+[dev-dependencies]
+rshell-terminal = { path = "../rshell-terminal" }
+
