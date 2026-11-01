@@ -351,6 +351,7 @@ async fn run_channel(
     let detection_timeout = tokio::time::sleep(Duration::from_secs(2));
     tokio::pin!(detection_timeout);
     let mut detection_timer_armed = false;
+    let mut remote_exited = false;
     async {
         loop {
             tokio::select! {
@@ -395,9 +396,13 @@ async fn run_channel(
                             }
                         }
                         Some(ChannelMsg::ExitStatus { exit_status }) => {
+                            remote_exited = true;
                             let _ = events.try_send(Event::Status(format!("远程进程退出：{exit_status}")));
                         }
-                        Some(ChannelMsg::Close) | None => break,
+                        Some(ChannelMsg::ExitSignal { .. }) => remote_exited = true,
+                        Some(ChannelMsg::Close) => break,
+                        None if remote_exited => break,
+                        None => bail!("SSH 传输意外中断"),
                         _ => {}
                     }
                 }

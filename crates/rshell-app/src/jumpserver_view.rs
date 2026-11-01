@@ -30,6 +30,11 @@ pub(super) struct State {
     abort: Option<tokio::task::AbortHandle>,
     next_sync: Instant,
     restore: bool,
+    pending_reconnect: Option<SessionRef>,
+    reconnect_account: Option<String>,
+    reconnect_inflight: Option<SessionRef>,
+    reconnect_queue: std::collections::VecDeque<SessionRef>,
+    auto_auth_blocked: bool,
     choice: Option<(Asset, Vec<Account>, Option<usize>)>,
     preference_accounts: Vec<String>,
     input_username: String,
@@ -40,6 +45,7 @@ pub(super) struct State {
 enum Work {
     Login(Zeroizing<String>),
     Restore(Zeroizing<String>),
+    SavedPassword,
     Mfa(String, Zeroizing<String>),
     SendMfa(String),
     Continue,
@@ -72,7 +78,12 @@ impl State {
             open: std::env::args()
                 .any(|a| a == "--smoke-jumpserver" || a == "--jumpserver-settings"),
             draft: settings.clone(),
-            restore: saved.is_some_and(|s| s.settings.remember),
+            restore: saved.is_some_and(|s| s.settings.remember || s.settings.remember_password),
+            pending_reconnect: None,
+            reconnect_account: None,
+            reconnect_inflight: None,
+            reconnect_queue: Default::default(),
+            auto_auth_blocked: false,
             settings,
             client: None,
             snapshot: saved.and_then(|s| s.snapshot.clone()),
@@ -119,6 +130,10 @@ impl State {
         self.job = None;
         self.generation = Uuid::new_v4();
         self.choice = None;
+        self.pending_reconnect = None;
+        self.reconnect_account = None;
+        self.reconnect_inflight = None;
+        self.reconnect_queue.clear();
         self.preference_accounts.clear();
         self.input_secret.zeroize();
         self.code.zeroize();
@@ -134,6 +149,7 @@ impl State {
         self.recent.clear();
         self.password.zeroize();
         self.restore = false;
+        self.auto_auth_blocked = true;
         self.status = "已退出登录；已有终端可单独断开".into();
     }
     fn saved(&self) -> Saved {
@@ -146,7 +162,10 @@ impl State {
         if self.busy() {
             return;
         }
-        let mut client = if matches!(work, Work::Login(_) | Work::Restore(_)) {
+        let mut client = if matches!(
+            work,
+            Work::Login(_) | Work::Restore(_) | Work::SavedPassword
+        ) {
             match Client::new(self.settings.clone()) {
                 Ok(c) => c,
                 Err(e) => {
@@ -189,6 +208,15 @@ impl State {
             let result = tokio::time::timeout(Duration::from_secs(180), async {
                 Ok::<Payload, anyhow::Error>(match work {
                     Work::Login(password) => Payload::Auth(client.login(&password).await?),
+                    Work::SavedPassword => {
+                        let id = client.settings.id;
+                        let password = tokio::task::spawn_blocking(move || {
+                            jms::credentials::read_password(id)
+                        })
+                        .await??
+                        .ok_or_else(|| anyhow::anyhow!("未保存密码，请输入密码并登录"))?;
+                        Payload::Auth(client.login(&password).await?)
+                    }
                     Work::Restore(token) => {
                         client.restore(token).await?;
                         Payload::Auth(AuthStep::LoggedIn)
@@ -253,12 +281,33 @@ impl App {
                 .start(self.runtime.handle(), ctx, Work::Restore(token));
         } else {
             self.jumpserver.status = "未保存登录状态，请登录".into();
+            self.auto_auth_jumpserver(ctx);
+        }
+    }
+
+    fn auto_auth_jumpserver(&mut self, ctx: &egui::Context) {
+        if self.jumpserver.settings.remember_password
+            && !self.jumpserver.auto_auth_blocked
+            && !self.jumpserver.busy()
+        {
+            self.jumpserver.auto_auth_blocked = true;
+            self.jumpserver.client = None;
+            self.jumpserver
+                .start(self.runtime.handle(), ctx, Work::SavedPassword);
         }
     }
 
     pub(super) fn poll_jumpserver(&mut self, ctx: &egui::Context) {
         if self.jumpserver.client.as_ref().is_some_and(Client::expired) {
+            let pending = self
+                .jumpserver
+                .pending_reconnect
+                .take()
+                .or_else(|| self.jumpserver.reconnect_inflight.take());
+            let queue = std::mem::take(&mut self.jumpserver.reconnect_queue);
             self.jumpserver.cancel();
+            self.jumpserver.pending_reconnect = pending;
+            self.jumpserver.reconnect_queue = queue;
             self.jumpserver.client = None;
             self.jumpserver.status = "登录保持时间已到，请重新登录并完成 MFA".into();
             self.submit(
@@ -268,6 +317,7 @@ impl App {
                 },
                 Pending::Update,
             );
+            self.auto_auth_jumpserver(ctx);
         }
         if self.jumpserver.restore {
             self.jumpserver.restore = false;
@@ -319,6 +369,22 @@ impl App {
                             }
                             self.jumpserver.error = error;
                             self.jumpserver.status = "请求失败；保留上次成功列表".into();
+                            if self.jumpserver.client.is_none() {
+                                if self.jumpserver.pending_reconnect.is_none() {
+                                    self.jumpserver.pending_reconnect =
+                                        self.jumpserver.reconnect_inflight.take();
+                                }
+                                self.auto_auth_jumpserver(ctx);
+                            }
+                            if !self.jumpserver.busy() {
+                                if self.jumpserver.mfa.is_empty() && !self.jumpserver.approval {
+                                    self.jumpserver.pending_reconnect = None;
+                                    self.jumpserver.reconnect_account = None;
+                                    self.jumpserver.reconnect_inflight = None;
+                                    self.jumpserver.reconnect_queue.clear();
+                                }
+                                self.jumpserver.open = true;
+                            }
                         }
                         Ok(Payload::Auth(AuthStep::Mfa(choices))) => {
                             self.jumpserver.mfa_kind = choices
@@ -363,7 +429,9 @@ impl App {
                             );
                             self.save_jumpserver();
                             self.jumpserver.status = "已登录".into();
-                            if !self.jumpserver.settings.org_id.is_empty() {
+                            if let Some(reference) = self.jumpserver.pending_reconnect.take() {
+                                self.reconnect_jumpserver(ctx, reference);
+                            } else if !self.jumpserver.settings.org_id.is_empty() {
                                 self.jumpserver
                                     .start(self.runtime.handle(), ctx, Work::Sync);
                             } else {
@@ -378,6 +446,7 @@ impl App {
                                 "已加载授权账号，请选择优先级并保存配置".into();
                         }
                         Ok(Payload::Snapshot(snapshot)) => {
+                            self.jumpserver.auto_auth_blocked = false;
                             self.jumpserver.preference_accounts.clear();
                             self.jumpserver.status =
                                 format!("已同步 {} 个资产", snapshot.assets.len());
@@ -388,10 +457,29 @@ impl App {
                             self.jumpserver.status = "请选择授权账号".into();
                             self.jumpserver.input_username.clear();
                             self.jumpserver.input_secret.zeroize();
-                            let preferred = jms::preferred_account(
-                                &accounts,
-                                &self.jumpserver.settings.default_accounts,
-                            );
+                            let preferred =
+                                if let Some(wanted) = self.jumpserver.reconnect_account.take() {
+                                    let matches: Vec<_> = accounts
+                                        .iter()
+                                        .enumerate()
+                                        .filter(|(_, a)| a.username == wanted)
+                                        .map(|(i, _)| i)
+                                        .collect();
+                                    if matches.len() != 1 {
+                                        self.jumpserver.error =
+                                            "原会话账号已不可用或存在歧义，已停止自动重连".into();
+                                        self.jumpserver.reconnect_queue.clear();
+                                        self.jumpserver.reconnect_inflight = None;
+                                        self.jumpserver.open = true;
+                                        return;
+                                    }
+                                    Some(matches[0])
+                                } else {
+                                    jms::preferred_account(
+                                        &accounts,
+                                        &self.jumpserver.settings.default_accounts,
+                                    )
+                                };
                             if let Some(index) = preferred
                                 && accounts[index].has_secret
                                 && accounts[index].has_username
@@ -411,6 +499,8 @@ impl App {
                             }
                         }
                         Ok(Payload::Connected(resolved)) => {
+                            self.jumpserver.reconnect_inflight = None;
+                            self.jumpserver.auto_auth_blocked = false;
                             let reference = SessionRef {
                                 settings: self.jumpserver.settings.clone(),
                                 user_id: self.jumpserver.client.as_ref().unwrap().user_id.clone(),
@@ -440,6 +530,15 @@ impl App {
                 }
             }
         }
+        if !self.jumpserver.busy()
+            && self.jumpserver.mfa.is_empty()
+            && !self.jumpserver.approval
+            && self.jumpserver.choice.is_none()
+            && self.jumpserver.pending_reconnect.is_none()
+            && let Some(reference) = self.jumpserver.reconnect_queue.pop_front()
+        {
+            self.reconnect_jumpserver(ctx, reference);
+        }
         if self.jumpserver.settings.auto_sync
             && self.jumpserver.authenticated()
             && !self.jumpserver.busy()
@@ -459,18 +558,55 @@ impl App {
             .start(self.runtime.handle(), ctx, Work::Accounts(asset));
     }
 
-    pub(super) fn reconnect_jumpserver(&mut self, ctx: &egui::Context, reference: SessionRef) {
-        if !self.jumpserver.settings.same_identity(&reference.settings)
-            || !self
-                .jumpserver
-                .client
-                .as_ref()
-                .is_some_and(|c| c.logged_in() && c.user_id == reference.user_id)
+    pub(super) fn queue_jumpserver_reconnect(&mut self, reference: SessionRef) {
+        if self.jumpserver.settings.remember_password
+            && (!self.jumpserver.auto_auth_blocked
+                || self.jumpserver.busy()
+                || !self.jumpserver.mfa.is_empty())
+            && self.jumpserver.settings.same_identity(&reference.settings)
+            && self.jumpserver.reconnect_queue.len() < 20
         {
+            self.jumpserver.reconnect_queue.push_back(reference);
+        }
+    }
+
+    pub(super) fn reconnect_jumpserver(&mut self, ctx: &egui::Context, reference: SessionRef) {
+        if !self.jumpserver.settings.same_identity(&reference.settings) {
             self.message = "请登录此会话原来的 JumpServer 实例、用户和组织后再重连".into();
             self.jumpserver.open = true;
             return;
         }
+        if !self.jumpserver.authenticated() {
+            self.jumpserver.pending_reconnect = Some(reference);
+            if !self.jumpserver.busy()
+                && self.jumpserver.mfa.is_empty()
+                && !self.jumpserver.approval
+            {
+                self.jumpserver.auto_auth_blocked = false;
+                self.auto_auth_jumpserver(ctx);
+            }
+            if !self.jumpserver.busy() {
+                self.jumpserver.open = true;
+            }
+            return;
+        }
+        if !self
+            .jumpserver
+            .client
+            .as_ref()
+            .is_some_and(|c| c.user_id == reference.user_id)
+        {
+            self.message = "登录用户与原会话不一致，已取消重连".into();
+            return;
+        }
+        if self.jumpserver.busy() {
+            if self.jumpserver.reconnect_queue.len() < 20 {
+                self.jumpserver.reconnect_queue.push_back(reference);
+            }
+            return;
+        }
+        self.jumpserver.reconnect_inflight = Some(reference.clone());
+        self.jumpserver.reconnect_account = Some(reference.account);
         self.open_jump_asset(ctx, reference.asset);
     }
 
@@ -614,6 +750,8 @@ impl App {
                                 ui.label("登录保持时间");
                                 ui.add(egui::DragValue::new(&mut state.draft.keep_minutes).range(1..=43200).suffix(" 分钟"));
                             });
+                            ui.checkbox(&mut state.draft.remember_password, "记住密码，到期自动登录 / 异常断线重连")
+                                .on_hover_text("密码仅保存到 Windows 凭据管理器；需要 MFA 时弹出验证码窗口。取消勾选并保存配置会删除密码。");
                             ui.small("有效期以本地与服务端较短值为准；延长保持时间需重新登录。");
                             ui.add_space(8.0); ui.separator(); ui.strong("资产同步");
                             ui.horizontal_wrapped(|ui| {
@@ -759,7 +897,30 @@ impl App {
                             Pending::Update,
                         );
                     }
+                    if old_id != self.jumpserver.draft.id {
+                        self.submit(
+                            Action::JumpServerPassword {
+                                id: old_id,
+                                password: None,
+                            },
+                            Pending::Update,
+                        );
+                    }
                     self.jumpserver.settings = self.jumpserver.draft.clone();
+                    if !self.jumpserver.settings.remember_password || !password.is_empty() {
+                        let saved_password = self
+                            .jumpserver
+                            .settings
+                            .remember_password
+                            .then(|| password.clone());
+                        self.submit(
+                            Action::JumpServerPassword {
+                                id: self.jumpserver.settings.id,
+                                password: saved_password,
+                            },
+                            Pending::Update,
+                        );
+                    }
                     self.jumpserver.next_sync =
                         Instant::now() + self.jumpserver.settings.sync_interval();
                     if let Some(c) = &mut self.jumpserver.client {
@@ -783,12 +944,22 @@ impl App {
                         Pending::Update,
                     );
                     if action == 2 {
+                        let pending = self.jumpserver.pending_reconnect.take();
                         self.jumpserver.cancel();
+                        self.jumpserver.pending_reconnect = pending;
+                        self.jumpserver.auto_auth_blocked = true;
                         self.jumpserver.client = None;
                         self.jumpserver.mfa.clear();
                         self.jumpserver.approval = false;
-                        self.jumpserver
-                            .start(self.runtime.handle(), ctx, Work::Login(password));
+                        self.jumpserver.start(
+                            self.runtime.handle(),
+                            ctx,
+                            if password.is_empty() && self.jumpserver.settings.remember_password {
+                                Work::SavedPassword
+                            } else {
+                                Work::Login(password)
+                            },
+                        );
                     } else {
                         self.jumpserver.status = "配置保存已提交".into();
                     }
@@ -804,6 +975,15 @@ impl App {
             }
             4 => {
                 self.jumpserver.logout();
+                self.jumpserver.settings.remember_password = false;
+                self.jumpserver.draft.remember_password = false;
+                self.submit(
+                    Action::JumpServerPassword {
+                        id: self.jumpserver.settings.id,
+                        password: None,
+                    },
+                    Pending::Update,
+                );
                 if self.config.jumpserver.is_some() {
                     self.save_jumpserver();
                 }
@@ -848,6 +1028,7 @@ impl App {
                 self.jumpserver.cancel();
                 self.jumpserver.client = None;
                 self.jumpserver.approval = false;
+                self.jumpserver.auto_auth_blocked = true;
                 self.jumpserver.status = "已取消 MFA 验证，请重新登录".into();
             }
             10 => {
@@ -1049,6 +1230,163 @@ mod tests {
         output
     }
 
+    fn test_settings() -> Settings {
+        Settings {
+            url: "http://127.0.0.1:9".into(),
+            ssh_host: "127.0.0.1".into(),
+            username: "synthetic-user".into(),
+            allow_http: true,
+            ..Default::default()
+        }
+    }
+
+    fn reference(settings: &Settings) -> SessionRef {
+        SessionRef { settings: settings.clone(), user_id: "synthetic-id".into(),
+            asset: serde_json::from_value(serde_json::json!({"id":Uuid::new_v4(), "name":"test", "address":"127.0.0.1", "protocols":[]})).unwrap(),
+            account: "original-account".into() }
+    }
+
+    #[test]
+    fn reconnect_without_password_waits_and_logout_cancels_it() {
+        let (_temp, ctx, mut app) = app();
+        app.jumpserver.settings = test_settings();
+        let reference = reference(&app.jumpserver.settings);
+        app.reconnect_jumpserver(&ctx, reference);
+        assert!(app.jumpserver.pending_reconnect.is_some());
+        assert!(!app.jumpserver.busy());
+        app.jumpserver.logout();
+        assert!(app.jumpserver.pending_reconnect.is_none());
+        assert!(app.jumpserver.auto_auth_blocked);
+        app.auto_auth_jumpserver(&ctx);
+        assert!(!app.jumpserver.busy());
+    }
+
+    #[test]
+    fn reconnect_never_falls_back_to_another_single_account() {
+        let (_temp, ctx, mut app) = app();
+        app.jumpserver.settings = test_settings();
+        app.jumpserver.reconnect_account = Some("original-account".into());
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        app.jumpserver.job = Some(rx);
+        let account: Account = serde_json::from_value(serde_json::json!({
+            "alias":"other", "name":"other", "username":"other", "has_secret":true,
+            "has_username":true, "actions":["connect"]
+        }))
+        .unwrap();
+        assert!(
+            tx.send(Reply {
+                client: Client::new(app.jumpserver.settings.clone()).unwrap(),
+                restoring: false,
+                result: Ok(Payload::Accounts(
+                    reference(&app.jumpserver.settings).asset,
+                    vec![account]
+                ))
+            })
+            .is_ok()
+        );
+        app.poll_jumpserver(&ctx);
+        assert!(app.jumpserver.error.contains("原会话账号"));
+        assert!(!app.jumpserver.busy());
+        assert!(app.tabs.iter().all(|t| t.jumpserver.is_none()));
+    }
+
+    #[test]
+    #[ignore = "explicit Windows Credential Manager and loopback authentication validation"]
+    fn saved_password_auto_auth_mfa_and_failure_stop() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline);
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(e) => panic!("loopback accept: {e}"),
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut buf = [0; 1024];
+                let n = stream.read(&mut buf).unwrap();
+                assert!(n > 0 && request.len() < 16384);
+                request.extend_from_slice(&buf[..n]);
+                if let Some(end) = request.windows(4).position(|s| s == b"\r\n\r\n") {
+                    let headers = std::str::from_utf8(&request[..end]).unwrap();
+                    let length: usize = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (key, value) = line.split_once(':')?;
+                            key.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap();
+                    if request.len() >= end + 4 + length {
+                        let body: serde_json::Value =
+                            serde_json::from_slice(&request[end + 4..end + 4 + length]).unwrap();
+                        assert!(body["password"] == "synthetic-password");
+                        break;
+                    }
+                }
+            }
+            let body = r#"{"error":"mfa_required","data":{"choices":["otp"]}}"#;
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+        });
+        let (_temp, ctx, mut app) = app();
+        let settings = Settings {
+            url: format!("http://{address}"),
+            remember_password: true,
+            ..test_settings()
+        };
+        struct Cleanup(Uuid);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = jms::credentials::delete_password(self.0);
+            }
+        }
+        let _cleanup = Cleanup(settings.id);
+        jms::credentials::write_password(settings.id, "synthetic-password").unwrap();
+        app.jumpserver.settings = settings.clone();
+        app.jumpserver.draft = settings.clone();
+        app.reconnect_jumpserver(&ctx, reference(&settings));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while app.jumpserver.busy() {
+            assert!(Instant::now() < deadline);
+            app.poll_jumpserver(&ctx);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        server.join().unwrap();
+        assert_eq!(app.jumpserver.mfa, vec!["otp"]);
+        assert!(app.jumpserver.pending_reconnect.is_some());
+        assert!(app.jumpserver.password.is_empty());
+        // Wrong MFA preserves the requested reconnect so another code can finish it.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        app.jumpserver.job = Some(rx);
+        assert!(
+            tx.send(Reply {
+                client: app.jumpserver.client.clone().unwrap(),
+                restoring: false,
+                result: Err("HTTP 401 验证码错误".into())
+            })
+            .is_ok()
+        );
+        app.poll_jumpserver(&ctx);
+        assert!(app.jumpserver.pending_reconnect.is_some());
+        app.jumpserver.cancel();
+        app.jumpserver.client = None;
+        app.auto_auth_jumpserver(&ctx);
+        assert!(!app.jumpserver.busy());
+        assert!(app.jumpserver.pending_reconnect.is_none());
+    }
+
     #[test]
     fn options_action_opens_configuration_with_retention_and_three_priorities() {
         let (_temp, ctx, mut app) = app();
@@ -1070,6 +1408,7 @@ mod tests {
         for label in [
             "JumpServer 堡垒机配置",
             "登录保持时间",
+            "记住密码，到期自动登录 / 异常断线重连",
             "默认连接账号（可选）",
             "连接信息",
             "资产同步",

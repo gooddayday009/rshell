@@ -365,3 +365,25 @@ try {
 ### Agent 组件交付验证
 
 常规 `scripts/test.ps1` 包含下载回环、取消/校验失败与组件选择框回归。公开 Release 实测可运行 `cargo run --locked -p rshell-core --example component_download_probe -- --download`；`--download` 是此探针明确的下载授权，正式界面必须先选择「下载并使用」。可将当前进程 `LOCALAPPDATA` 指向 `target` 下的隔离目录，避免影响已有用户缓存。探针验证固定文件校验、缓存复用和 SDK `--self-test`，不调用真实模型或执行终端命令。
+
+
+## GitHub 软件更新验证
+
+- 入口：帮助 → 检查更新。只在用户主动点击时访问 `gooddayday009/rshell` 的 Releases；安装包下载后可点击「安装并重启…」，确认关闭所有会话后，由复制到下载目录的独立 Rust 助手等待原进程退出、重新校验 SHA-256、运行 NSIS 静默安装并重启；也保留打开目录入口。
+- 单元及回环验证：`cargo test --locked -p rshell-core update::tests`，覆盖稳定版本数值比较、限定资产地址、校验文件包名、损坏/长度不符的包和取消清理。
+- GUI 控件验证：`cargo test --locked -p rshell update_dialog_reports_results_blocks_terminal_and_cancels_work`，不访问公网，验证任务结果、错误提示、取消以及更新弹窗期间终端不接收输入。
+- 可选真实下载验证：`cargo run --locked -p rshell-core --example update_probe -- --download`，下载到 `target/update-probe` 并校验 SHA-256，不运行任何安装包；省略 `--download` 只检查版本及资产列表。
+- 2026-11-01 已验证：真实 GitHub 的 2.3.3 安装包与便携 ZIP 下载和 SHA-256 校验通过，记录 `target/update-live-probe.log`；`scripts/test.ps1` 通过，记录 `target/update-checks.log`。按用户要求未运行冒烟测试，未启动安装或验证真实窗口/升级流程；现有安装包不包含本次新增入口。
+- 资源边界：版本元数据最多 1 MiB，校验文本最多 4 KiB，单包最多 256 MiB；连接超时 15 秒，元数据/校验请求 20 秒，下载 300 秒。SHA-256 用于文件完整性验证，不等于代码签名。下载缓存不会自动清理已验证包，可在退出下载任务后按需删除。
+
+关于窗口：帮助菜单只保留「关于 RShell…」与「检查更新…」。软件名称、编译版本和地址栏说明显示在独立关于弹窗，关闭后回到终端；该弹窗期间不向终端发送输入。
+
+## JumpServer 保存密码与自动认证验证
+
+运行 `scripts/test.ps1 -WithCredentials`：除原凭据测试外，还会运行 `saved_password_auto_auth_mfa_and_failure_stop`，使用随机凭据 ID、合成密码和回环 HTTP 服务，退出时删除测试密码。覆盖保存密码自动认证、MFA 提示、错误验证码后保留重连目标及取消后不继续认证；不连接实际 JumpServer。配置兼容和原账号不可用时停止重连由普通工作区测试覆盖。
+
+2026-11-01：上述检查通过，日志 `target/jumpserver-validation.log`；调试构建以及 JumpServer 配置/MFA 两个单场景窗口验证通过。真实 JumpServer 的令牌到期、MFA 成功后 SSH 重连及网络断线审计仍待现场验收，未打包发布。
+
+自动安装补充：准备更新和校验在后台执行；等待原进程退出最多 120 秒，超时不安装。安装目标是当前程序所在目录（含便携/开发运行目录），NSIS `/S` 静默安装，`/D` 使用当前绝对目录；已下载 ZIP 不作为可执行安装包。失败由更新助手显示错误；真实机器的覆盖安装与会话恢复仍需验收，程序不会自动恢复远端进程或未保存终端状态。
+
+2026-11-01 自动安装补充验证：`scripts/test.ps1` 通过（`target/auto-update-tests.log`），已构建 `target/debug/rshell.exe`。以隔离目录的模拟安装器验证更新助手退出等待、包含空格的安装路径、安装成功后启动新程序，安装/重启标记均生成，目录记录于 `target/auto-update-fixture-result.txt`。该测试不覆盖真实 NSIS 文件替换、注册表与真实会话退出；未运行窗口冒烟或实际安装到用户程序目录。

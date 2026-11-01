@@ -11,6 +11,10 @@ pub enum Action {
     ChromeVisibility(crate::config::ChromeVisibility),
     SaveJumpServer(crate::jumpserver::Saved),
     ReadJumpServerToken(Uuid),
+    JumpServerPassword {
+        id: Uuid,
+        password: Option<Zeroizing<String>>,
+    },
     JumpServerToken {
         id: Uuid,
         token: Option<Zeroizing<String>>,
@@ -214,6 +218,14 @@ impl<C: Credentials> State<C> {
             Action::SaveJumpServer(saved) => {
                 saved.settings.validate()?;
                 candidate.jumpserver = Some(saved);
+            }
+            Action::JumpServerPassword { id, password } => {
+                if let Some(password) = password {
+                    crate::jumpserver::credentials::write_password(id, &password)?;
+                } else {
+                    crate::jumpserver::credentials::delete_password(id)?;
+                }
+                return Ok(Outcome::JumpServerTokenSaved);
             }
             Action::ReadJumpServerToken(id) => {
                 return Ok(Outcome::Secret(crate::jumpserver::credentials::read(id)?));

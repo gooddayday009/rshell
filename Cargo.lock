@@ -3684,7 +3684,7 @@ dependencies = [
 
 [[package]]
 name = "rshell"
-version = "2.3.3"
+version = "2.3.4"
 dependencies = [
  "anyhow",
  "directories",
@@ -3704,7 +3704,7 @@ dependencies = [
 
 [[package]]
 name = "rshell-core"
-version = "2.3.3"
+version = "2.3.4"
 dependencies = [
  "anyhow",
  "encoding_rs",
@@ -3731,7 +3731,7 @@ dependencies = [
 
 [[package]]
 name = "rshell-terminal"
-version = "2.3.3"
+version = "2.3.4"
 dependencies = [
  "alacritty_terminal",
 ]

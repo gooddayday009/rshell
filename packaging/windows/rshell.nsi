@@ -73,7 +73,6 @@ Section "RShell" Main
   File "${PROJECT_ROOT}\README.md"
   File "${PROJECT_ROOT}\LICENSE"
   SetOutPath "$INSTDIR\docs"
-  File "${PROJECT_ROOT}\docs\STATUS.md"
   File "${PROJECT_ROOT}\docs\LOCAL_TESTING.md"
   File "${PROJECT_ROOT}\docs\AGENT_COMPONENT.md"
   File "${PROJECT_ROOT}\docs\SHORTCUTS.md"

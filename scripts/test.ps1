@@ -14,6 +14,7 @@ try {
     if ($WithCredentials) {
         Invoke-Cargo @('test', '--locked', '-p', 'rshell-core', 'encrypted_credentials_roundtrip')
         Invoke-Cargo @('test', '--locked', '-p', 'rshell-core', 'jumpserver_credentials_roundtrip', '--', '--ignored')
+        Invoke-Cargo @('test', '--locked', '-p', 'rshell', 'saved_password_auto_auth_mfa_and_failure_stop', '--', '--ignored')
     }
     if ($Smoke) {
         Invoke-Cargo @('build', '--locked', '-p', 'rshell')

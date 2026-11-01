@@ -498,8 +498,10 @@ fn settings_require_explicit_http_and_have_no_secret_fields() {
     assert!(settings.validate().is_err());
     settings.allow_http = true;
     assert!(settings.validate().is_ok());
-    let json = serde_json::to_string(&settings).unwrap();
-    assert!(!json.contains("password") && !json.contains("token"));
+    settings.remember_password = true;
+    let json = serde_json::to_value(&settings).unwrap();
+    assert!(json.get("password").is_none() && json.get("token").is_none());
+    assert_eq!(json["remember_password"], true);
     settings.url = "http://alice:secret@example.test".into();
     assert!(settings.validate().is_err());
 }
@@ -587,4 +589,12 @@ async fn default_candidates_fail_instead_of_returning_partial_results() {
             .is_err()
     );
     server.join().unwrap();
+}
+
+#[test]
+fn password_opt_in_is_disabled_for_legacy_settings() {
+    let mut value = serde_json::to_value(Settings::default()).unwrap();
+    value.as_object_mut().unwrap().remove("remember_password");
+    let settings: Settings = serde_json::from_value(value).unwrap();
+    assert!(!settings.remember_password);
 }

@@ -241,3 +241,13 @@ JumpServer 是会话来源与连接方式，SSH 仍是传输协议。不要仅�
 核对本地 v4.10.2 源码 `apps/perms/urls/user_permission.py`、`apps/perms/api/user_permission/assets.py` 与 `apps/perms/serializers/user_permission.py`：用户授权路由未提供全局账号列表；`GET /api/v1/perms/users/self/assets/` 提供分页资产列表，`GET /api/v1/perms/users/self/assets/{id}/` 返回 `permed_accounts`、`permed_protocols`。不使用需要授权规则管理权限的 `asset-permissions/{id}/accounts/` 接口。
 
 配置窗口不要求选择资产。用户点击「加载 / 刷新授权账号」后，后台依次查询当前组织的有效授权资产详情，只汇总允许 SSH 且具有 connect 权限的用户名与账号别名，排序去重供三个全局优先级选择。任一请求失败则整次加载失败，不返回部分候选；整体超时 180 秒，允许取消。资产较多时可能超时，性能仍需现场验收。候选不代表对其他资产的授权，连接时保留原有三级精确匹配及实时授权校验。旧配置值保留，每级可以清空为「不指定」。
+
+### 可选密码与自动重认证（2026-11-01）
+
+已实现：独立的 `remember_password` 开关，默认关闭；密码与令牌分别存入 Windows 凭据管理器，后台读写，JSON 只记录开关。启用后在无有效启动令牌、到期、API 401 时尝试密码认证，需要 MFA 时弹窗，审批按原流程处理。认证失败停止自动尝试；取消勾选并保存、身份切换、退出登录删除对应密码。密码框留空不覆盖已保存密码。
+
+重连在认证后继续，并校验原实例、用户、组织、资产和账号；原账号不可用或歧义时停止。已建立的 SSH 会话异常报错断开后尝试一次新连接，正常退出、主动断开和初次连接失败不触发；排队上限 20，退出登录、取消认证或切换身份清空队列。不会重放命令。已有健康终端不会因 API 登录到期而被主动断开。
+
+待验证：真实 JumpServer 的过期重认证、MFA、密码变更、网络断线与会话审计；本地模拟及 Windows 凭据测试不代表真实服务端验收。此功能未打包发布。
+
+已验证（本地，2026-11-01）：`scripts/test.ps1 -WithCredentials` 全部通过，包含格式、Clippy、工作区测试、18 项回环 SSH 测试、Windows 凭据的令牌/密码隔离与删除，以及保存密码自动发起回环认证、MFA 弹窗、错误验证码保留重连意图、取消后停止重试。日志：`target/jumpserver-validation.log`。调试版构建成功；配置窗口和 MFA 窗口分别完成单场景窗口验证，深色主题下开关、验证码框和主要按钮可见，280 px 侧栏未受影响；截图：`target/jumpserver-gui/remember-password-dark.png`、`target/jumpserver-gui/mfa-dark.png`。未运行整套 `-Smoke`，未替换现有发布包。

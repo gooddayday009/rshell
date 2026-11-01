@@ -13,6 +13,8 @@ mod key_manager;
 mod settings_view;
 #[path = "transfer_view.rs"]
 mod transfer_view;
+#[path = "update_view.rs"]
+mod update_view;
 use eframe::egui::{self, Color32, RichText};
 use rshell_core::{
     config::{
@@ -871,6 +873,8 @@ pub struct App {
     pending_close: Option<(usize, CloseTabs)>,
     pending_disconnect: Option<Uuid>,
     terminal_focus_blocked: bool,
+    updates: update_view::UpdateState,
+    about_open: bool,
 }
 
 struct HostEditor {
@@ -1245,6 +1249,8 @@ impl App {
             pending_close: None,
             pending_disconnect: None,
             terminal_focus_blocked: false,
+            updates: update_view::UpdateState::default(),
+            about_open: false,
         };
         if demo {
             let tab = app.configured_tab(Profile {
@@ -1903,6 +1909,7 @@ impl App {
 
     fn poll(&mut self, ctx: &egui::Context) {
         let mut recent = Vec::new();
+        let mut jump_reconnects = Vec::new();
         for tab in &mut self.tabs {
             let mut remote_finished = false;
             if let Some(connection) = &mut tab.connection {
@@ -1967,6 +1974,12 @@ impl App {
                         }
                         ssh::Event::Finished(result) => {
                             remote_finished = !tab.local && tab.connected;
+                            if tab.connected
+                                && result.is_err()
+                                && let Some(reference) = tab.jumpserver.clone()
+                            {
+                                jump_reconnects.push(reference);
+                            }
                             tab.connected = false;
                             tab.finished = true;
                             tab.host_prompt = None;
@@ -2011,6 +2024,9 @@ impl App {
             {
                 tab.host_prompt = None;
             }
+        }
+        for reference in jump_reconnects {
+            self.queue_jumpserver_reconnect(reference);
         }
         if !recent.is_empty() {
             self.submit(Action::Recent(recent), Pending::Update);
@@ -2696,6 +2712,11 @@ impl eframe::App for App {
         self.poll_session_file_picker();
         self.poll_store(ctx);
         self.poll_ai_request();
+        self.updates.poll();
+        if self.updates.exit_for_install {
+            self.exit_approved = true;
+            self.close_when_idle = true;
+        }
         self.poll(ctx);
         if ctx.input(|input| input.viewport().close_requested()) {
             if !self.exit_approved
@@ -2764,6 +2785,8 @@ impl eframe::App for App {
             self.active = 0;
         }
         let mut allow_terminal_input = !self.tabs.iter().any(|t| t.transfer.open)
+            && !self.updates.open
+            && !self.about_open
             && !self.jumpserver.modal_open()
             && !self.import_open
             && !self.confirm_exit_open
@@ -3004,9 +3027,14 @@ impl eframe::App for App {
                             }
                         });
                         ui.menu_button("帮助(H)", |ui| {
-                            ui.label("RShell · 原生 Rust 终端");
-                            ui.label(concat!("软件版本：", env!("CARGO_PKG_VERSION")));
-                            ui.label("地址栏输入主机或已保存会话名称，Enter 打开连接设置。");
+                            if ui.button("关于 RShell…").clicked() {
+                                self.about_open = true;
+                                ui.close();
+                            }
+                            if ui.button("检查更新…").clicked() {
+                                self.check_updates(ctx.clone());
+                                ui.close();
+                            }
                         });
                     });
                 }
@@ -3746,6 +3774,20 @@ impl eframe::App for App {
         self.session_confirmations(&ctx);
         self.draw_ai_editor(&ctx);
         self.draw_ai_command_confirmation(&ctx);
+        self.draw_updates(&ctx);
+        if self.about_open {
+            egui::Modal::new(egui::Id::unique("about_rshell")).show(&ctx, |ui| {
+                ui.set_max_width(360.0);
+                ui.heading("关于 RShell");
+                ui.label("RShell · 原生 Rust 终端");
+                ui.label(concat!("软件版本：", env!("CARGO_PKG_VERSION")));
+                ui.separator();
+                ui.label("地址栏输入主机或已保存会话名称，Enter 打开连接设置。");
+                if ui.button("关闭").clicked() {
+                    self.about_open = false;
+                }
+            });
+        }
         self.host_editor(&ctx);
         if !self.message.is_empty() {
             egui::Window::new("提示")

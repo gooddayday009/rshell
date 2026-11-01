@@ -12,7 +12,10 @@ fn target(id: Uuid) -> Vec<u16> {
 }
 
 pub fn read(id: Uuid) -> Result<Option<Zeroizing<String>>> {
-    let name = target(id);
+    read_target(target(id))
+}
+
+fn read_target(name: Vec<u16>) -> Result<Option<Zeroizing<String>>> {
     let mut credential = std::ptr::null_mut();
     if unsafe { CredReadW(name.as_ptr(), CRED_TYPE_GENERIC, 0, &mut credential) } == 0 {
         let error = std::io::Error::last_os_error();
@@ -38,11 +41,14 @@ pub fn read(id: Uuid) -> Result<Option<Zeroizing<String>>> {
 }
 
 pub fn write(id: Uuid, token: &str) -> Result<()> {
+    write_target(target(id), token)
+}
+
+fn write_target(mut name: Vec<u16>, token: &str) -> Result<()> {
     ensure!(
         !token.is_empty() && token.len() <= 2560,
-        "登录令牌超过 Windows 凭据容量限制"
+        "JumpServer 凭据超过 Windows 凭据容量限制"
     );
-    let mut name = target(id);
     let mut bytes = Zeroizing::new(token.as_bytes().to_vec());
     let credential = CREDENTIALW {
         Type: CRED_TYPE_GENERIC,
@@ -60,7 +66,10 @@ pub fn write(id: Uuid, token: &str) -> Result<()> {
 }
 
 pub fn delete(id: Uuid) -> Result<()> {
-    let name = target(id);
+    delete_target(target(id))
+}
+
+fn delete_target(name: Vec<u16>) -> Result<()> {
     if unsafe { CredDeleteW(name.as_ptr(), CRED_TYPE_GENERIC, 0) } == 0 {
         let error = std::io::Error::last_os_error();
         if error.raw_os_error() != Some(ERROR_NOT_FOUND as i32) {
@@ -68,6 +77,22 @@ pub fn delete(id: Uuid) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn password_target(id: Uuid) -> Vec<u16> {
+    format!("RShell/JumpServer/{id}/Password")
+        .encode_utf16()
+        .chain(Some(0))
+        .collect()
+}
+pub fn read_password(id: Uuid) -> Result<Option<Zeroizing<String>>> {
+    read_target(password_target(id))
+}
+pub fn write_password(id: Uuid, password: &str) -> Result<()> {
+    write_target(password_target(id), password)
+}
+pub fn delete_password(id: Uuid) -> Result<()> {
+    delete_target(password_target(id))
 }
 
 #[cfg(test)]
@@ -79,8 +104,19 @@ mod tests {
         let id = Uuid::new_v4();
         assert!(read(id).unwrap().is_none());
         write(id, "rshell-test-token").unwrap();
+        write_password(id, "synthetic-password-only").unwrap();
+        assert_eq!(
+            read_password(id).unwrap().unwrap().as_str(),
+            "synthetic-password-only"
+        );
+        assert!(write_password(id, "").is_err());
+        assert!(write_password(id, &"x".repeat(2561)).is_err());
         let result = read(id);
         delete(id).unwrap();
+        assert!(read_password(id).unwrap().is_some());
+        delete_password(id).unwrap();
+        assert!(read_password(id).unwrap().is_none());
+        delete_password(id).unwrap();
         assert_eq!(result.unwrap().unwrap().as_str(), "rshell-test-token");
         assert!(read(id).unwrap().is_none());
     }

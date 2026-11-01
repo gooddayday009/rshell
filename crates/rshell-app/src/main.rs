@@ -24,6 +24,12 @@ fn main() {
 }
 
 fn run() -> Result<()> {
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == "--apply-update")
+    {
+        return rshell_core::update::apply_update(&std::env::args_os().skip(2).collect::<Vec<_>>());
+    }
     if std::env::args().any(|arg| arg == "--agent-mcp") {
         return rshell_core::claude_agent::serve_stdio();
     }
