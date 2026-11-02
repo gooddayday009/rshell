@@ -16,11 +16,64 @@ const MAX_TOTAL: u64 = 32 * 1024 * 1024;
 
 /// Export one SSH/Telnet session using the Xshell XTS archive layout.
 pub fn export(path: &Path, profile: &Profile) -> Result<()> {
+    export_profiles(path, std::iter::once(profile))
+}
+
+/// Export every Xshell-compatible session, omitting serial sessions.
+pub fn export_all(path: &Path, profiles: &[Profile]) -> Result<()> {
+    export_profiles(
+        path,
+        profiles.iter().filter(|p| p.protocol != Protocol::Serial),
+    )
+}
+
+fn export_profiles<'a>(path: &Path, profiles: impl Iterator<Item = &'a Profile>) -> Result<()> {
     ensure!(
         path.extension()
             .is_some_and(|ext| ext.eq_ignore_ascii_case("xts")),
         "请选择 .xts 文件"
     );
+    let mut entries = Vec::new();
+    let mut names = std::collections::HashSet::new();
+    let mut total = 0;
+    for profile in profiles {
+        let utf16 = session_content(profile)?;
+        total += utf16.len() as u64;
+        ensure!(total <= MAX_TOTAL, "XTS 会话内容超过 32 MiB");
+        let mut name = profile.name.clone();
+        let mut suffix = 2;
+        while !names.insert(name.to_lowercase()) {
+            name = format!("{} ({suffix})", profile.name);
+            suffix += 1;
+        }
+        entries.push((name, utf16));
+    }
+    ensure!(!entries.is_empty(), "暂无可导出的 SSH/Telnet 会话");
+    ensure!(entries.len() <= 4096, "XTS 条目超过 4096 个");
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .context("无法创建 .xts 文件；已有同名文件时请另选名称")?;
+    let result = (|| -> Result<()> {
+        let mut writer = zip::ZipWriter::new(file);
+        for (name, utf16) in entries {
+            writer.start_file(
+                format!("Xshell/Sessions/{name}.xsh"),
+                zip::write::SimpleFileOptions::default(),
+            )?;
+            writer.write_all(&utf16)?;
+        }
+        writer.finish()?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(path);
+    }
+    result
+}
+
+fn session_content(profile: &Profile) -> Result<Vec<u8>> {
     ensure!(
         matches!(profile.protocol, Protocol::Ssh | Protocol::Telnet),
         "串口会话暂不支持导出为 XTS"
@@ -52,25 +105,8 @@ pub fn export(path: &Path, profile: &Profile) -> Result<()> {
     for unit in content.encode_utf16() {
         utf16.extend_from_slice(&unit.to_le_bytes());
     }
-    let file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .context("无法创建 .xts 文件；已有同名文件时请另选名称")?;
-    let result = (|| -> Result<()> {
-        let mut writer = zip::ZipWriter::new(file);
-        writer.start_file(
-            format!("Xshell/Sessions/{}.xsh", profile.name),
-            zip::write::SimpleFileOptions::default(),
-        )?;
-        writer.write_all(&utf16)?;
-        writer.finish()?.sync_all()?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(path);
-    }
-    result
+    ensure!(utf16.len() as u64 <= MAX_ENTRY, "XTS 单个会话超过 1 MiB");
+    Ok(utf16)
 }
 
 #[derive(Default, Debug)]
@@ -516,6 +552,47 @@ mod tests {
             filename.copy_from_slice(replacement);
         }
         std::fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn all_sessions_skip_serial_and_keep_duplicate_names() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("all.xts");
+        let ssh = Profile {
+            name: "同名会话".into(),
+            host: "example.test".into(),
+            username: "demo".into(),
+            key_path: "C:/secret/private.key".into(),
+            ..Profile::default()
+        };
+        let telnet = Profile {
+            protocol: Protocol::Telnet,
+            ..ssh.clone()
+        };
+        let serial = Profile {
+            protocol: Protocol::Serial,
+            ..ssh.clone()
+        };
+        export_all(&path, &[ssh.clone(), telnet, serial.clone()]).unwrap();
+        let (config, report) = import(&path, &Config::default()).unwrap();
+        assert_eq!(report.ssh, 1);
+        assert_eq!(report.telnet, 1);
+        assert_eq!(config.profiles.len(), 2);
+        assert_ne!(config.profiles[0].name, config.profiles[1].name);
+        assert!(config.profiles.iter().all(|p| p.key_path.is_empty()));
+        let mut archive = zip::ZipArchive::new(File::open(&path).unwrap()).unwrap();
+        for i in 0..archive.len() {
+            let mut bytes = Vec::new();
+            archive
+                .by_index(i)
+                .unwrap()
+                .read_to_end(&mut bytes)
+                .unwrap();
+            let text = decode(&bytes).unwrap();
+            assert!(!text.contains("private.key"));
+        }
+        assert!(export_all(&temp.path().join("serial.xts"), &[serial]).is_err());
+        assert!(export_all(&path, &[ssh]).is_err());
     }
 
     #[test]

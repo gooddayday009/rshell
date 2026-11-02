@@ -21,11 +21,9 @@ pub enum Action {
     },
     ImportRsh(PathBuf),
     ExportRsh {
-        id: Uuid,
         path: PathBuf,
     },
     ExportXts {
-        id: Uuid,
         path: PathBuf,
     },
     ImportXts(PathBuf),
@@ -239,31 +237,19 @@ impl<C: Credentials> State<C> {
                 return Ok(Outcome::JumpServerTokenSaved);
             }
             Action::ImportRsh(path) => {
-                let profile = crate::rsh::import(&path)?;
-                let name = profile.name.clone();
-                candidate.profiles.push(profile);
+                let profiles = crate::rsh::import_all(&path)?;
+                let name = format!("{} 个会话", profiles.len());
+                candidate.profiles.extend(profiles);
                 candidate.save(&self.path)?;
                 self.config = candidate;
                 return Ok(Outcome::ImportedRsh(self.config.clone(), name));
             }
-            Action::ExportRsh { id, path } => {
-                let profile = self
-                    .config
-                    .profiles
-                    .iter()
-                    .find(|p| p.id == id)
-                    .context("会话已不存在")?;
-                crate::rsh::export(&path, profile)?;
+            Action::ExportRsh { path } => {
+                crate::rsh::export_all(&path, &self.config.profiles)?;
                 return Ok(Outcome::ExportedRsh(path));
             }
-            Action::ExportXts { id, path } => {
-                let profile = self
-                    .config
-                    .profiles
-                    .iter()
-                    .find(|p| p.id == id)
-                    .context("会话已不存在")?;
-                crate::xts::export(&path, profile)?;
+            Action::ExportXts { path } => {
+                crate::xts::export_all(&path, &self.config.profiles)?;
                 return Ok(Outcome::ExportedXts(path));
             }
             Action::ImportXts(path) => {

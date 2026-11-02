@@ -1,11 +1,11 @@
-//! RShell's portable, single-session file. Only the listed public settings cross the boundary.
+//! RShell's portable session file. Only the listed public settings cross the boundary.
 use crate::config::{AuthMethod, KeepAlive, Profile, Protocol, SerialSettings};
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::{fs, io::Write, path::Path};
 use uuid::Uuid;
 
-const MAX_FILE: u64 = 1024 * 1024;
+const MAX_FILE: u64 = 32 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -31,8 +31,7 @@ fn check_extension(path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn export(path: &Path, profile: &Profile) -> Result<()> {
-    check_extension(path)?;
+fn session_file(profile: &Profile) -> Result<SessionFile> {
     profile.validate()?;
     // A private-key session must select its key again after import.
     let file = SessionFile {
@@ -51,7 +50,35 @@ pub fn export(path: &Path, profile: &Profile) -> Result<()> {
         },
         keep_alive: profile.keep_alive.clone(),
     };
-    let data = serde_json::to_vec_pretty(&file)?;
+    Ok(file)
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionCollection {
+    format: String,
+    version: u32,
+    sessions: Vec<SessionFile>,
+}
+
+pub fn export(path: &Path, profile: &Profile) -> Result<()> {
+    write_file(path, &session_file(profile)?)
+}
+
+pub fn export_all(path: &Path, profiles: &[Profile]) -> Result<()> {
+    ensure!(!profiles.is_empty(), "暂无可导出的会话");
+    ensure!(profiles.len() <= 4096, "会话超过 4096 个");
+    let file = SessionCollection {
+        format: "RShell sessions".into(),
+        version: 2,
+        sessions: profiles.iter().map(session_file).collect::<Result<_>>()?,
+    };
+    write_file(path, &file)
+}
+
+fn write_file(path: &Path, file: &impl Serialize) -> Result<()> {
+    check_extension(path)?;
+    let data = serde_json::to_vec_pretty(file)?;
     ensure!(data.len() as u64 <= MAX_FILE, "会话文件过大");
     let mut output = fs::OpenOptions::new()
         .write(true)
@@ -67,11 +94,40 @@ pub fn export(path: &Path, profile: &Profile) -> Result<()> {
     Ok(())
 }
 
-pub fn import(path: &Path) -> Result<Profile> {
+pub fn import_all(path: &Path) -> Result<Vec<Profile>> {
     check_extension(path)?;
     ensure!(fs::metadata(path)?.len() <= MAX_FILE, ".rsh 文件过大");
     let data = fs::read(path).context("无法读取 .rsh 文件")?;
-    let file: SessionFile = serde_json::from_slice(&data).context("无效的 .rsh 会话文件")?;
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Portable {
+        Single(SessionFile),
+        Collection(SessionCollection),
+    }
+    let files = match serde_json::from_slice(&data).context("无效的 .rsh 会话文件")? {
+        Portable::Single(file) => vec![file],
+        Portable::Collection(file) => {
+            ensure!(
+                file.format == "RShell sessions" && file.version == 2,
+                "不支持的 .rsh 会话格式或版本"
+            );
+            ensure!(
+                !file.sessions.is_empty() && file.sessions.len() <= 4096,
+                "会话数量须为 1 至 4096 个"
+            );
+            file.sessions
+        }
+    };
+    files.into_iter().map(into_profile).collect()
+}
+
+pub fn import(path: &Path) -> Result<Profile> {
+    let mut profiles = import_all(path)?;
+    ensure!(profiles.len() == 1, "此文件包含多个会话");
+    Ok(profiles.remove(0))
+}
+
+fn into_profile(file: SessionFile) -> Result<Profile> {
     if file.format != "RShell session" || file.version != 1 {
         bail!("不支持的 .rsh 会话格式或版本");
     }
@@ -97,6 +153,44 @@ pub fn import(path: &Path) -> Result<Profile> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn all_sessions_roundtrip_including_serial_without_key_material() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("all.rsh");
+        let ssh = Profile {
+            name: "同名会话".into(),
+            host: "example.test".into(),
+            auth: AuthMethod::PrivateKey,
+            key_path: "C:/secret/private.key".into(),
+            remember_secret: true,
+            ..Profile::default()
+        };
+        let serial = Profile {
+            protocol: Protocol::Serial,
+            name: ssh.name.clone(),
+            ..Profile::default()
+        };
+        let telnet = Profile {
+            protocol: Protocol::Telnet,
+            remember_secret: false,
+            ..ssh.clone()
+        };
+        let profiles = vec![ssh, serial, telnet];
+        export_all(&path, &profiles).unwrap();
+        let imported = import_all(&path).unwrap();
+        assert_eq!(imported.len(), profiles.len());
+        for (before, after) in profiles.iter().zip(&imported) {
+            assert_eq!(before.name, after.name);
+            assert_eq!(before.protocol, after.protocol);
+            assert_ne!(before.id, after.id);
+            assert!(after.key_path.is_empty());
+            assert!(!after.remember_secret);
+        }
+        assert!(!fs::read_to_string(&path).unwrap().contains("C:/secret"));
+        assert!(export_all(&path, &profiles).is_err());
+        assert!(export_all(&temp.path().join("empty.rsh"), &[]).is_err());
+    }
 
     #[test]
     fn roundtrip_excludes_local_identity_and_credentials() {

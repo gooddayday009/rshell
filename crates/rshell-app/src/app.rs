@@ -918,8 +918,8 @@ enum Pending {
 
 enum SessionFilePick {
     Import(PathBuf),
-    ExportRsh(Uuid, PathBuf),
-    ExportXts(Uuid, PathBuf),
+    ExportRsh(PathBuf),
+    ExportXts(PathBuf),
 }
 
 impl Drop for App {
@@ -930,7 +930,7 @@ impl Drop for App {
 }
 
 impl App {
-    fn choose_session_file(&mut self, ctx: &egui::Context, export: Option<(Uuid, bool)>) {
+    fn choose_session_file(&mut self, ctx: &egui::Context, export: Option<bool>) {
         if self.session_file_picker.is_some() {
             return;
         }
@@ -938,18 +938,18 @@ impl App {
         let notify = ctx.clone();
         std::thread::spawn(move || {
             let selected = match export {
-                Some((id, true)) => rfd::FileDialog::new()
-                    .set_title("导出 Xshell 会话")
+                Some(true) => rfd::FileDialog::new()
+                    .set_title("导出全部 SSH/Telnet 会话")
                     .add_filter("Xshell 导出", &["xts"])
-                    .set_file_name("session.xts")
+                    .set_file_name("sessions.xts")
                     .save_file()
-                    .map(|path| SessionFilePick::ExportXts(id, path)),
-                Some((id, false)) => rfd::FileDialog::new()
-                    .set_title("导出 RShell 会话")
+                    .map(SessionFilePick::ExportXts),
+                Some(false) => rfd::FileDialog::new()
+                    .set_title("导出全部 RShell 会话")
                     .add_filter("RShell 会话", &["rsh"])
-                    .set_file_name("session.rsh")
+                    .set_file_name("sessions.rsh")
                     .save_file()
-                    .map(|path| SessionFilePick::ExportRsh(id, path)),
+                    .map(SessionFilePick::ExportRsh),
                 None => rfd::FileDialog::new()
                     .set_title("导入 RShell 会话")
                     .add_filter("RShell 会话", &["rsh"])
@@ -972,8 +972,8 @@ impl App {
                 if let Some(pick) = pick {
                     let action = match pick {
                         SessionFilePick::Import(path) => Action::ImportRsh(path),
-                        SessionFilePick::ExportRsh(id, path) => Action::ExportRsh { id, path },
-                        SessionFilePick::ExportXts(id, path) => Action::ExportXts { id, path },
+                        SessionFilePick::ExportRsh(path) => Action::ExportRsh { path },
+                        SessionFilePick::ExportXts(path) => Action::ExportXts { path },
                     };
                     self.submit(action, Pending::SessionFile);
                 }
@@ -2178,18 +2178,21 @@ impl App {
                     self.open_profile_editor(copy, false);
                     ui.close();
                 }
-                if ui.button("导出会话 (.rsh)…").clicked() {
-                    self.choose_session_file(ui.ctx(), Some((profile.id, false)));
+                if ui.button("导出全部会话 (.rsh)…").clicked() {
+                    self.choose_session_file(ui.ctx(), Some(false));
                     ui.close();
                 }
                 if ui
                     .add_enabled(
-                        profile.protocol != Protocol::Serial,
-                        egui::Button::new("导出给 Xshell (.xts)…"),
+                        self.config
+                            .profiles
+                            .iter()
+                            .any(|p| p.protocol != Protocol::Serial),
+                        egui::Button::new("导出全部给 Xshell (.xts)…"),
                     )
                     .clicked()
                 {
-                    self.choose_session_file(ui.ctx(), Some((profile.id, true)));
+                    self.choose_session_file(ui.ctx(), Some(true));
                     ui.close();
                 }
                 ui.menu_button("移动到文件夹", |ui| {
@@ -2908,43 +2911,24 @@ impl eframe::App for App {
                                             }
                                             ui.separator();
                                             for (label, xshell) in [
-                                                ("导出 RShell 会话 (.rsh)…", false),
-                                                ("导出给 Xshell (.xts)…", true),
+                                                ("导出全部 RShell 会话 (.rsh)…", false),
+                                                ("导出全部给 Xshell (.xts)…", true),
                                             ] {
-                                                ui.menu_button(label, |ui| {
-                                                    let profiles =
-                                                        self.config.profiles.iter().filter(
-                                                            |profile| {
-                                                                !xshell
-                                                                    || profile.protocol
-                                                                        != Protocol::Serial
-                                                            },
-                                                        );
-                                                    let mut any = false;
-                                                    for profile in profiles {
-                                                        any = true;
-                                                        if ui
-                                                            .button(&profile.name)
-                                                            .on_hover_text(format!(
-                                                                "{} · {}",
-                                                                profile.endpoint(),
-                                                                self.config
-                                                                    .folder_path(profile.folder_id)
-                                                            ))
-                                                            .clicked()
-                                                        {
-                                                            export_profile =
-                                                                Some((profile.id, xshell));
-                                                            ui.close();
-                                                        }
-                                                    }
-                                                    if !any {
-                                                        ui.add_enabled(
-                                                            false,
-                                                            egui::Button::new("暂无可导出的会话"),
-                                                        );
-                                                    }
-                                                });
+                                                let available =
+                                                    self.config.profiles.iter().any(|profile| {
+                                                        !xshell
+                                                            || profile.protocol != Protocol::Serial
+                                                    });
+                                                if ui
+                                                    .add_enabled(
+                                                        available,
+                                                        egui::Button::new(label),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    export_profile = Some(xshell);
+                                                    ui.close();
+                                                }
                                             }
                                         });
                                     }

@@ -1,13 +1,13 @@
 # Windows 构建与打包
 
-本目录保存 Windows 交付说明。`scripts/build.ps1` 构建 release exe 与便携 ZIP；`scripts/build-installer.ps1` 使用按 zlib/libpng 许可开放商业使用的 NSIS 生成 2.3.4 Windows x64 安装包。
+本目录保存 Windows 交付说明。`scripts/build.ps1` 构建 release exe 与便携 ZIP；`scripts/build-installer.ps1` 使用按 zlib/libpng 许可开放商业使用的 NSIS 生成 2.3.5 Windows x64 安装包。
 
 ```powershell
 .\scripts\test.ps1 -Smoke
 .\scripts\build-installer.ps1 -MakensisPath 'C:\Program Files (x86)\NSIS\Bin\makensis.exe'
 ```
 
-安装包在 `dist/RShell-2.3.4-windows-x64-setup.exe`，同目录有 SHA-256 文件。按当前用户安装到 `%LOCALAPPDATA%\Programs\RShell`；通过 Windows“已安装的应用”卸载。安装、升级和卸载不删除用户配置或 DPAPI 加密凭据。安装器版本来自 workspace `Cargo.toml`，安装脚本为 `packaging/windows/rshell.nsi`。如 NSIS 不在默认路径，可用 `-MakensisPath` 指定。安装器会先卸载本机已安装的 1.0.0 Inno 版本。
+安装包在 `dist/RShell-2.3.5-windows-x64-setup.exe`，同目录有 SHA-256 文件。按当前用户安装到 `%LOCALAPPDATA%\Programs\RShell`；通过 Windows“已安装的应用”卸载。安装、升级和卸载不删除用户配置或 DPAPI 加密凭据。安装器版本来自 workspace `Cargo.toml`，安装脚本为 `packaging/windows/rshell.nsi`。如 NSIS 不在默认路径，可用 `-MakensisPath` 指定。安装器会先卸载本机已安装的 1.0.0 Inno 版本。
 
 如果已有窗口占用 `target/release/rshell.exe`，可加 `-TargetDirectory target/windows-next` 在独立目录构建。1.0.0 Inno 升级路径尚待实机验证，升级前请备份配置。
 
