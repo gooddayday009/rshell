@@ -387,3 +387,5 @@ try {
 自动安装补充：准备更新和校验在后台执行；等待原进程退出最多 120 秒，超时不安装。安装目标是当前程序所在目录（含便携/开发运行目录），NSIS `/S` 静默安装，`/D` 使用当前绝对目录；已下载 ZIP 不作为可执行安装包。失败由更新助手显示错误；真实机器的覆盖安装与会话恢复仍需验收，程序不会自动恢复远端进程或未保存终端状态。
 
 2026-11-01 自动安装补充验证：`scripts/test.ps1` 通过（`target/auto-update-tests.log`），已构建 `target/debug/rshell.exe`。以隔离目录的模拟安装器验证更新助手退出等待、包含空格的安装路径、安装成功后启动新程序，安装/重启标记均生成，目录记录于 `target/auto-update-fixture-result.txt`。该测试不覆盖真实 NSIS 文件替换、注册表与真实会话退出；未运行窗口冒烟或实际安装到用户程序目录。
+
+2.3.4 打包验证（2026-11-01）：`scripts/test.ps1` 通过格式、严格 Clippy 和 217 项测试（4 项原有忽略），Release 构建成功；日志 `target/release-234-checks.log`、`target/release-234-build.log`。按用户要求未运行冒烟或真实安装。产物为 `dist/RShell-2.3.4-windows-x64-setup.exe` 与 `dist/RShell-2.3.4-windows-x64-portable.zip`，各附 SHA-256。
