@@ -1,6 +1,8 @@
 # RShell
 
 RShell 是面向 Windows x64 的原生终端与 SSH 客户端，使用 Rust 开发，集成多会话管理、文件传输和 AI 助手，适合日常服务器运维与本地命令行操作。
+<img width="1398" height="806" alt="PixPin_2026-11-03_15-35-45" src="https://github.com/user-attachments/assets/d17b3745-6815-43b0-b389-041f2d7017b8" />
+
 
 ## 主要功能
 
