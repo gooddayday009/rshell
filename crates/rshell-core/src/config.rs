@@ -175,6 +175,20 @@ impl Profile {
         }
     }
     pub fn validate(&self) -> Result<()> {
+        self.validate_portable()?;
+        if self.protocol == Protocol::Ssh {
+            if self.username.trim().is_empty() {
+                bail!("名称、用户名不能为空，端口必须在 1–65535 之间");
+            }
+            if self.auth == AuthMethod::PrivateKey && self.key_path.trim().is_empty() {
+                bail!("请选择私钥文件路径");
+            }
+        }
+        Ok(())
+    }
+
+    /// Portable sessions may omit login details that must be supplied before connecting.
+    pub(crate) fn validate_portable(&self) -> Result<()> {
         if self.name.trim().is_empty() {
             bail!("名称不能为空");
         }
@@ -194,11 +208,8 @@ impl Profile {
             }
             return Ok(());
         }
-        if self.port == 0 || self.username.trim().is_empty() || self.name.trim().is_empty() {
+        if self.port == 0 {
             bail!("名称、用户名不能为空，端口必须在 1–65535 之间");
-        }
-        if self.auth == AuthMethod::PrivateKey && self.key_path.trim().is_empty() {
-            bail!("请选择私钥文件路径");
         }
         Ok(())
     }
@@ -537,7 +548,6 @@ pub enum TerminalTheme {
 pub struct SessionOptions {
     pub confirm_exit: bool,
     pub confirm_disconnect: bool,
-    pub restore_local_shell: bool,
     pub clear_scrollback_on_close: bool,
     pub auto_save_session: bool,
     pub remember_secret_by_default: bool,
@@ -548,7 +558,6 @@ impl Default for SessionOptions {
         Self {
             confirm_exit: true,
             confirm_disconnect: true,
-            restore_local_shell: true,
             clear_scrollback_on_close: false,
             auto_save_session: true,
             remember_secret_by_default: true,

@@ -111,7 +111,6 @@ pub enum Outcome {
 pub enum SessionOption {
     ConfirmExit,
     ConfirmDisconnect,
-    RestoreLocalShell,
     ClearScrollbackOnClose,
     AutoSaveSession,
     RememberSecretByDefault,
@@ -535,9 +534,6 @@ impl<C: Credentials> State<C> {
                 SessionOption::ConfirmExit => candidate.session_options.confirm_exit = enabled,
                 SessionOption::ConfirmDisconnect => {
                     candidate.session_options.confirm_disconnect = enabled
-                }
-                SessionOption::RestoreLocalShell => {
-                    candidate.session_options.restore_local_shell = enabled
                 }
                 SessionOption::ClearScrollbackOnClose => {
                     candidate.session_options.clear_scrollback_on_close = enabled

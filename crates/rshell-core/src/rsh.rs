@@ -32,7 +32,7 @@ fn check_extension(path: &Path) -> Result<()> {
 }
 
 fn session_file(profile: &Profile) -> Result<SessionFile> {
-    profile.validate()?;
+    profile.validate_portable()?;
     // A private-key session must select its key again after import.
     let file = SessionFile {
         format: "RShell session".into(),
@@ -146,7 +146,7 @@ fn into_profile(file: SessionFile) -> Result<Profile> {
         folder_id: None,
         group: String::new(),
     };
-    profile.validate()?;
+    profile.validate_portable()?;
     Ok(profile)
 }
 

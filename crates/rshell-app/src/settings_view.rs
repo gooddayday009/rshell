@@ -474,10 +474,6 @@ impl App {
         ui.checkbox(&mut options.confirm_exit, "退出 RShell 时确认断开连接");
         ui.checkbox(&mut options.confirm_disconnect, "会话终止时确认断开连接");
         ui.checkbox(
-            &mut options.restore_local_shell,
-            "连接终止时还原为本地 Shell",
-        );
-        ui.checkbox(
             &mut options.clear_scrollback_on_close,
             "清除滚动缓冲区，当连接关闭",
         );
@@ -502,11 +498,6 @@ impl App {
                 SessionOption::ConfirmDisconnect,
                 self.config.session_options.confirm_disconnect,
                 options.confirm_disconnect,
-            ),
-            (
-                SessionOption::RestoreLocalShell,
-                self.config.session_options.restore_local_shell,
-                options.restore_local_shell,
             ),
             (
                 SessionOption::ClearScrollbackOnClose,

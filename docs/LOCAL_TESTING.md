@@ -58,7 +58,7 @@ cargo run --locked -p rshell-core --example local_ssh_server
 5. 拖动选择文字，点击「复制选区」，在你自己的文本编辑器中检查复制结果。
 6. 粘贴两行测试文本，先取消再确认，检查多行粘贴弹窗。
 7. 从同一配置再打开一个连接，检查标签输入互不影响。
-8. 输入 `exit` 让服务关闭该 channel，再测试手动重新连接和主动断开。
+8. 输入 `exit` 让服务关闭该 channel，确认原标签仍显示该会话名和断开状态，点击顶部工具栏的“重新连接”，核对原标签重新连接到原目标，标签数量保持一致，再测试主动断开。
 9. 保存会话、修改字号或主题，退出客户端并重新启动，检查持久化。
 
 测试服务只处理 `help`、`colors`、`clear`、`exit` 及文本回显，不调用系统 shell；**不能用它验收 bash/vim/top/less/tmux**。
@@ -389,3 +389,9 @@ try {
 2026-11-01 自动安装补充验证：`scripts/test.ps1` 通过（`target/auto-update-tests.log`），已构建 `target/debug/rshell.exe`。以隔离目录的模拟安装器验证更新助手退出等待、包含空格的安装路径、安装成功后启动新程序，安装/重启标记均生成，目录记录于 `target/auto-update-fixture-result.txt`。该测试不覆盖真实 NSIS 文件替换、注册表与真实会话退出；未运行窗口冒烟或实际安装到用户程序目录。
 
 2.3.4 打包验证（2026-11-01）：`scripts/test.ps1` 通过格式、严格 Clippy 和 217 项测试（4 项原有忽略），Release 构建成功；日志 `target/release-234-checks.log`、`target/release-234-build.log`。按用户要求未运行冒烟或真实安装。产物为 `dist/RShell-2.3.4-windows-x64-setup.exe` 与 `dist/RShell-2.3.4-windows-x64-portable.zip`，各附 SHA-256。
+
+2.3.5 打包验证（2026-11-02）：包含直接导出全部已保存会话的改动。`scripts/test.ps1 -Smoke` 通过格式检查、严格 Clippy、219 项测试（4 项原有忽略）及全部 21 个窗口场景；日志 `target/release-235-checks.log`。Release 构建与安装器生成通过，日志 `target/release-235-build.log`、`target/release-235-installer.log`。产物为 `dist/RShell-2.3.5-windows-x64-setup.exe` 和 `dist/RShell-2.3.5-windows-x64-portable.zip`，各附 SHA-256；已核对安装器版本与 ZIP 内程序一致性。真实安装、Linux/OpenSSH 和 Xshell 客户端兼容性仍待验收，未上传发布。
+
+导出回归检查：从 Xshell 导入缺少用户名的 SSH 会话，分别导出全部 `.rsh` 与 `.xts` 并重新导入，确认会话数量不变、空用户名被保留；连接前仍须补齐用户名。此场景已纳入 `missing_user_is_preserved_and_invalid_host_skipped` 测试。
+
+2026-11-02：空用户名会话导出修复后重新打包 2.3.5。`scripts/test.ps1 -Smoke` 通过 219 项测试（4 项原有忽略）和 21 个窗口场景，日志 `target/release-235-export-fix-checks.log`。安装包与便携包已重建并更新 SHA-256，旧包保存在 `dist/previous-2.3.5-*`。未执行真实安装及真实 Xshell 客户端验收。

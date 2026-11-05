@@ -481,6 +481,7 @@ struct Editor {
     generation: Uuid,
     loading: bool,
     connect_after_load: bool,
+    reconnect_tab: Option<Uuid>,
     profile: Profile,
     secret: String,
     loaded_identity: Option<(String, u16, String, AuthMethod, String)>,
@@ -497,6 +498,7 @@ impl Editor {
             generation: Uuid::new_v4(),
             loading: false,
             connect_after_load: false,
+            reconnect_tab: None,
             profile,
             secret: String::new(),
             loaded_identity: None,
@@ -1333,7 +1335,7 @@ impl App {
             }));
         }
         if !demo {
-            app.start_local(&cc.egui_ctx);
+            app.start_local(&cc.egui_ctx, None);
             app.startup_local_tab = app.tabs.last().map(|tab| tab.id);
         }
         cc.egui_ctx.all_styles_mut(|style| {
@@ -1402,15 +1404,16 @@ impl App {
             14 => self.choose_session_file(ctx, None),
             13 => self.import_open = true,
             0 => self.open_profile(self.new_profile()),
-            1 => self.start_local(ctx),
+            1 => self.start_local(ctx, None),
             2 => {
                 if let Some(tab) = self.tabs.get(self.active) {
                     if tab.local {
-                        self.start_local(ctx);
-                    } else if let Some(reference) = tab.jumpserver.clone() {
+                        self.start_local(ctx, Some(tab.id));
+                    } else if let Some(mut reference) = tab.jumpserver.clone() {
+                        reference.reconnect_tab = Some(tab.id);
                         self.reconnect_jumpserver(ctx, reference);
                     } else {
-                        self.open_profile(tab.profile.clone());
+                        self.open_profile_editor(tab.profile.clone(), true, Some(tab.id));
                     }
                 }
             }
@@ -1470,10 +1473,10 @@ impl App {
             return;
         };
         match action {
-            TabAction::New => self.start_local(ctx),
+            TabAction::New => self.start_local(ctx, None),
             TabAction::Duplicate => {
                 if tab.local {
-                    self.start_local(ctx);
+                    self.start_local(ctx, None);
                 } else if let Some(reference) = tab.jumpserver.clone() {
                     self.reconnect_jumpserver(ctx, reference);
                 } else {
@@ -1698,6 +1701,7 @@ impl App {
                             ctx,
                             editor.profile.clone(),
                             std::mem::take(&mut editor.secret),
+                            editor.reconnect_tab,
                         );
                     }
                 }
@@ -1756,6 +1760,7 @@ impl App {
                             ctx,
                             editor.profile.clone(),
                             std::mem::take(&mut editor.secret),
+                            editor.reconnect_tab,
                         );
                     }
                 }
@@ -1844,11 +1849,39 @@ impl App {
         }
     }
 
-    fn start_local(&mut self, ctx: &egui::Context) {
-        let mut tab = self.configured_tab(Profile {
-            name: "PowerShell".into(),
-            ..Default::default()
-        });
+    fn prepare_connection_tab(
+        &mut self,
+        profile: Profile,
+        reconnect_tab: Option<Uuid>,
+    ) -> Option<usize> {
+        let mut tab = self.configured_tab(profile);
+        if let Some(id) = reconnect_tab {
+            let index = self.tabs.iter().position(|tab| tab.id == id)?;
+            tab.id = id;
+            tab.title = self.tabs[index].title.clone();
+            tab.font_size_override = self.tabs[index].font_size_override;
+            tab.focus = self.active == index;
+            self.ai_command = None;
+            self.tabs[index] = tab;
+            Some(index)
+        } else {
+            self.tabs.push(tab);
+            self.active = self.tabs.len() - 1;
+            Some(self.active)
+        }
+    }
+
+    fn start_local(&mut self, ctx: &egui::Context, reconnect_tab: Option<Uuid>) {
+        let Some(index) = self.prepare_connection_tab(
+            Profile {
+                name: "PowerShell".into(),
+                ..Default::default()
+            },
+            reconnect_tab,
+        ) else {
+            return;
+        };
+        let tab = &mut self.tabs[index];
         tab.local = true;
         tab.status = "正在启动本地终端…".into();
         tab.connection = Some(rshell_core::local::connect(
@@ -1858,8 +1891,6 @@ impl App {
                 ctx: ctx.clone(),
             },
         ));
-        self.tabs.push(tab);
-        self.active = self.tabs.len() - 1;
         ctx.request_repaint();
     }
 
@@ -1880,8 +1911,15 @@ impl App {
         }
     }
 
-    fn start_connection(&mut self, ctx: &egui::Context, profile: Profile, secret: String) {
-        let mut tab = self.configured_tab(profile.clone());
+    fn start_connection(
+        &mut self,
+        ctx: &egui::Context,
+        profile: Profile,
+        secret: String,
+        reconnect_tab: Option<Uuid>,
+    ) -> Option<&mut Tab> {
+        let index = self.prepare_connection_tab(profile.clone(), reconnect_tab)?;
+        let tab = &mut self.tabs[index];
         let adapter = TerminalAdapter {
             terminal: tab.terminal.clone(),
             ctx: ctx.clone(),
@@ -1900,14 +1938,16 @@ impl App {
             )
         });
         tab.status = "连接中".into();
-        self.tabs.push(tab);
-        self.active = self.tabs.len() - 1;
-        if let Some(id) = self.startup_local_tab.take() {
+        if reconnect_tab.is_none()
+            && let Some(id) = self.startup_local_tab.take()
+        {
             close_startup_local_tab(&mut self.tabs, &mut self.active, id);
+            return self.tabs.get_mut(self.active);
         }
+        self.tabs.get_mut(index)
     }
 
-    fn poll(&mut self, ctx: &egui::Context) {
+    fn poll(&mut self) {
         let mut recent = Vec::new();
         let mut jump_reconnects = Vec::new();
         for tab in &mut self.tabs {
@@ -1976,8 +2016,9 @@ impl App {
                             remote_finished = !tab.local && tab.connected;
                             if tab.connected
                                 && result.is_err()
-                                && let Some(reference) = tab.jumpserver.clone()
+                                && let Some(mut reference) = tab.jumpserver.clone()
                             {
+                                reference.reconnect_tab = Some(tab.id);
                                 jump_reconnects.push(reference);
                             }
                             tab.connected = false;
@@ -1991,31 +2032,10 @@ impl App {
                     }
                 }
             }
-            if remote_finished {
-                if self.config.session_options.clear_scrollback_on_close {
-                    *tab.terminal.lock().unwrap() = Terminal::with_history(
-                        tab.size.0,
-                        tab.size.1,
-                        self.config.scrollback_lines,
-                    );
-                    tab.search_position = None;
-                }
-                if self.config.session_options.restore_local_shell {
-                    tab.connection = Some(rshell_core::local::connect(
-                        self.runtime.handle(),
-                        TerminalAdapter {
-                            terminal: tab.terminal.clone(),
-                            ctx: ctx.clone(),
-                        },
-                    ));
-                    tab.local = true;
-                    tab.jumpserver = None;
-                    tab.profile = Profile::default();
-                    tab.title = "PowerShell".into();
-                    tab.status = "正在启动本地终端…".into();
-                    tab.finished = false;
-                    tab.focus = true;
-                }
+            if remote_finished && self.config.session_options.clear_scrollback_on_close {
+                *tab.terminal.lock().unwrap() =
+                    Terminal::with_history(tab.size.0, tab.size.1, self.config.scrollback_lines);
+                tab.search_position = None;
             }
             if tab
                 .host_prompt
@@ -2089,6 +2109,7 @@ impl App {
                             ..self.new_profile()
                         },
                         false,
+                        None,
                     );
                     ui.close();
                 }
@@ -2167,7 +2188,7 @@ impl App {
                     ui.close();
                 }
                 if ui.button("编辑会话").clicked() {
-                    self.open_profile_editor(profile.clone(), false);
+                    self.open_profile_editor(profile.clone(), false, None);
                     ui.close();
                 }
                 if ui.button("复制会话").clicked() {
@@ -2175,7 +2196,7 @@ impl App {
                     copy.id = Uuid::new_v4();
                     copy.name.push_str(" 副本");
                     copy.remember_secret = false;
-                    self.open_profile_editor(copy, false);
+                    self.open_profile_editor(copy, false, None);
                     ui.close();
                 }
                 if ui.button("导出全部会话 (.rsh)…").clicked() {
@@ -2258,16 +2279,22 @@ impl App {
     }
 
     fn open_profile(&mut self, profile: Profile) {
-        self.open_profile_editor(profile, true);
+        self.open_profile_editor(profile, true, None);
     }
 
-    fn open_profile_editor(&mut self, profile: Profile, connect_after_load: bool) {
+    fn open_profile_editor(
+        &mut self,
+        profile: Profile,
+        connect_after_load: bool,
+        reconnect_tab: Option<Uuid>,
+    ) {
         if self.profile_saving() {
             self.message = "正在保存会话，请等待完成".into();
             return;
         }
         let mut editor = Editor::new(profile);
         editor.connect_after_load = connect_after_load;
+        editor.reconnect_tab = reconnect_tab;
         if editor.profile.protocol == Protocol::Ssh
             && editor.profile.remember_secret
             && self
@@ -2616,6 +2643,7 @@ impl App {
                 ctx,
                 editor.profile.clone(),
                 std::mem::take(&mut editor.secret),
+                editor.reconnect_tab,
             );
         }
     }
@@ -2720,7 +2748,7 @@ impl eframe::App for App {
             self.exit_approved = true;
             self.close_when_idle = true;
         }
-        self.poll(ctx);
+        self.poll();
         if ctx.input(|input| input.viewport().close_requested()) {
             if !self.exit_approved
                 && !self.smoke
@@ -2809,7 +2837,7 @@ impl eframe::App for App {
             && !self.tabs.iter().any(|tab| tab.host_prompt.is_some());
         if allow_terminal_input {
             if consume_shortcut(&ctx, &self.config.shortcuts.new_local) {
-                self.start_local(&ctx);
+                self.start_local(&ctx, None);
                 allow_terminal_input = false;
             }
             if consume_shortcut(&ctx, &self.config.shortcuts.close_tab) {
@@ -2863,11 +2891,7 @@ impl eframe::App for App {
                             ),
                             (
                                 "工具(T)",
-                                vec![
-                                    ("重新连接（新建终端）", 2),
-                                    ("断开连接", 3),
-                                    ("SFTP 文件传输…", 12),
-                                ],
+                                vec![("重新连接", 2), ("断开连接", 3), ("SFTP 文件传输…", 12)],
                             ),
                             (
                                 "选项(O)",
@@ -3027,7 +3051,7 @@ impl eframe::App for App {
                         for (tip, id) in [
                             ("新建 SSH / Telnet / 串口会话", 0),
                             ("本地 PowerShell", 1),
-                            ("重新连接（新建终端）", 2),
+                            ("重新连接", 2),
                             ("断开连接", 3),
                             ("复制选区", 4),
                             ("回到底部", 6),
@@ -3333,7 +3357,7 @@ impl eframe::App for App {
                                 .on_hover_text("新建会话")
                                 .clicked()
                             {
-                                self.open_profile_editor(self.new_profile(), false);
+                                self.open_profile_editor(self.new_profile(), false, None);
                             }
                         });
                     });
@@ -3731,7 +3755,7 @@ impl eframe::App for App {
             self.add_terminal_selection_to_ai(tab_id, &text);
         }
         if local_reopen {
-            self.start_local(&ctx);
+            self.start_local(&ctx, None);
         }
         self.rename_dialog(&ctx);
         self.folder_dialog(&ctx);
@@ -4432,6 +4456,87 @@ mod tests {
     }
 
     #[test]
+    fn remote_exit_keeps_shell_target_for_toolbar_reconnect() {
+        use eframe::App as _;
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target");
+        let temp = tempfile::tempdir_in(root).unwrap();
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut app = App::new(
+            &cc,
+            Config::default(),
+            temp.path().join("config.json"),
+            runtime,
+            true,
+            false,
+        )
+        .unwrap();
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let profile = Profile {
+            name: "loopback-shell".into(),
+            protocol: Protocol::Telnet,
+            host: "127.0.0.1".into(),
+            port: listener.local_addr().unwrap().port(),
+            ..Profile::default()
+        };
+        app.start_connection(&ctx, profile.clone(), String::new(), None);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !app.tabs[app.active].connected {
+            app.poll();
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        drop(listener.accept().unwrap());
+        while !app.tabs[app.active].finished {
+            app.poll();
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let tab = &app.tabs[app.active];
+        assert!(!tab.local && !tab.connected);
+        assert_eq!(tab.title, profile.name);
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.ui(ui, &mut eframe::Frame::_new_kittest())
+        });
+        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.job.text.contains("已断开"))));
+        output.textures_delta.clear();
+        let original = app.tabs[app.active].id;
+        let count = app.tabs.len();
+        app.chrome_action(2, &ctx);
+        let target = &app.editor.as_ref().unwrap().profile;
+        assert_eq!(target.id, profile.id);
+        assert_eq!((&target.host, target.port), (&profile.host, profile.port));
+        let editor = app.editor.take().unwrap();
+        assert_eq!(editor.reconnect_tab, Some(original));
+        app.start_connection(
+            &ctx,
+            editor.profile.clone(),
+            String::new(),
+            editor.reconnect_tab,
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !app.tabs[app.active].connected {
+            app.poll();
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(app.tabs.len(), count);
+        assert_eq!(app.tabs[app.active].id, original);
+        let index = app.active;
+        close_tabs(&mut app.tabs, &mut app.active, index, CloseTabs::Current);
+        assert!(
+            app.start_connection(&ctx, profile, String::new(), Some(original))
+                .is_none()
+        );
+        assert_eq!(app.tabs.len(), count - 1);
+    }
+
+    #[test]
     fn local_tab_and_menu_remain_available_before_worker_starts() {
         use eframe::App as _;
         let root =
@@ -4463,7 +4568,7 @@ mod tests {
         });
         started.recv_timeout(Duration::from_secs(5)).unwrap();
         let old_count = app.tabs.len();
-        app.start_local(&ctx);
+        app.start_local(&ctx, None);
         assert_eq!(app.tabs.len(), old_count + 1);
         assert_eq!(app.active, old_count);
         assert!(!app.tabs[old_count].connected);

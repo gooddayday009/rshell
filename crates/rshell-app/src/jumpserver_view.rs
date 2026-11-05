@@ -5,6 +5,7 @@ use rshell_core::jumpserver::{
 
 #[derive(Clone)]
 pub(super) struct SessionRef {
+    pub reconnect_tab: Option<Uuid>,
     pub settings: Settings,
     pub user_id: String,
     pub asset: Asset,
@@ -499,9 +500,14 @@ impl App {
                             }
                         }
                         Ok(Payload::Connected(resolved)) => {
-                            self.jumpserver.reconnect_inflight = None;
+                            let reconnect_tab = self
+                                .jumpserver
+                                .reconnect_inflight
+                                .take()
+                                .and_then(|reference| reference.reconnect_tab);
                             self.jumpserver.auto_auth_blocked = false;
                             let reference = SessionRef {
+                                reconnect_tab: None,
                                 settings: self.jumpserver.settings.clone(),
                                 user_id: self.jumpserver.client.as_ref().unwrap().user_id.clone(),
                                 asset: resolved.asset.clone(),
@@ -516,8 +522,14 @@ impl App {
                                 remember_secret: false,
                                 ..Default::default()
                             };
-                            self.start_connection(ctx, profile, resolved.secret.to_string());
-                            let tab = self.tabs.last_mut().unwrap();
+                            let Some(tab) = self.start_connection(
+                                ctx,
+                                profile,
+                                resolved.secret.to_string(),
+                                reconnect_tab,
+                            ) else {
+                                return;
+                            };
                             // Keep the one-time username out of the GUI's profile and all export paths.
                             tab.profile.username = resolved.account;
                             tab.jumpserver = Some(reference);
@@ -554,6 +566,9 @@ impl App {
     }
 
     pub(super) fn open_jump_asset(&mut self, ctx: &egui::Context, asset: Asset) {
+        if self.jumpserver.choice.is_some() {
+            return;
+        }
         self.jumpserver
             .start(self.runtime.handle(), ctx, Work::Accounts(asset));
     }
@@ -599,7 +614,7 @@ impl App {
             self.message = "登录用户与原会话不一致，已取消重连".into();
             return;
         }
-        if self.jumpserver.busy() {
+        if self.jumpserver.busy() || self.jumpserver.choice.is_some() {
             if self.jumpserver.reconnect_queue.len() < 20 {
                 self.jumpserver.reconnect_queue.push_back(reference);
             }
@@ -1102,6 +1117,7 @@ impl App {
             );
         }
         if cancel {
+            self.jumpserver.reconnect_inflight = None;
             self.jumpserver.choice = None;
             self.jumpserver.input_secret.zeroize();
         }
@@ -1241,7 +1257,7 @@ mod tests {
     }
 
     fn reference(settings: &Settings) -> SessionRef {
-        SessionRef { settings: settings.clone(), user_id: "synthetic-id".into(),
+        SessionRef { reconnect_tab: None, settings: settings.clone(), user_id: "synthetic-id".into(),
             asset: serde_json::from_value(serde_json::json!({"id":Uuid::new_v4(), "name":"test", "address":"127.0.0.1", "protocols":[]})).unwrap(),
             account: "original-account".into() }
     }
@@ -1565,6 +1581,7 @@ mod tests {
     fn jumpserver_reconnect_without_original_login_never_opens_direct_editor() {
         let (_temp, ctx, mut app) = app();
         let reference = SessionRef {
+            reconnect_tab: None,
             settings: Settings::default(),
             user_id: Uuid::new_v4().to_string(),
             account: "deploy".into(),

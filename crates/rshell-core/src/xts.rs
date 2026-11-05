@@ -78,7 +78,7 @@ fn session_content(profile: &Profile) -> Result<Vec<u8>> {
         matches!(profile.protocol, Protocol::Ssh | Protocol::Telnet),
         "串口会话暂不支持导出为 XTS"
     );
-    profile.validate()?;
+    profile.validate_portable()?;
     ensure!(
         !profile
             .name
@@ -794,7 +794,20 @@ mod tests {
             (report.ssh, report.missing_username, report.invalid),
             (1, 1, 1)
         );
-        assert!(config.profiles[0].username.is_empty());
+        let profile = &config.profiles[0];
+        assert!(profile.username.is_empty());
+        assert!(profile.validate().is_err());
+        let exported = temp.path().join("exported.xts");
+        export_all(&exported, &config.profiles).unwrap();
+        let (roundtrip, report) = import(&exported, &Config::default()).unwrap();
+        assert_eq!(report.missing_username, 1);
+        assert!(roundtrip.profiles[0].username.is_empty());
+        let rsh = temp.path().join("exported.rsh");
+        crate::rsh::export_all(&rsh, &config.profiles).unwrap();
+        let roundtrip = crate::rsh::import_all(&rsh).unwrap();
+        assert_eq!(roundtrip.len(), 1);
+        assert!(roundtrip[0].username.is_empty());
+        assert!(roundtrip[0].validate().is_err());
     }
 
     /// Explicit opt-in, local file only. No connections and no secrets printed.
