@@ -1,5 +1,11 @@
 # 开发状态
 
+## 2.3.13 PowerShell Unicode 测试修复（2026-11-06）
+
+- 证据：GitHub `v2.3.12` 已通过 Rust/NSIS 初始化，但本地 PowerShell Unicode 测试输出为 `??????`。本机强制控制台代码页 437 后复现相同失败，日志 `target/test-artifacts/local-cp437-repro.log`。
+- 已修复：测试先设置并确认代码页 437，再为 `[Console]::WriteLine` 显式设置 UTF-8，保留中文输入输出、尺寸调整、OpenSSH 输出和退出检查，避免依赖测试机的默认区域设置。只调整测试环境，不改应用启动或全局编码配置，也不跳过测试。
+- 已验证：强制代码页 437 后的修复测试通过，日志 `target/test-artifacts/local-cp437-fixed.log`；本机 `scripts/test.ps1` 的格式检查、严格 Clippy 和 270 项常规测试通过（5 项专项默认忽略），日志 `target/test-artifacts/release-2.3.13-check.log`。GitHub 发布结果需单独确认。
+
 ## 2.3.12 自动发布修复（2026-11-06）
 
 - 已修复：Rust 安装命令分别传入 `--component rustfmt --component clippy`，避免 `clippy` 被当作工具链名导致 GitHub Actions 初始化失败。

@@ -1,5 +1,7 @@
 # Windows 本地测试指南
 
+本地 PowerShell 的 `powershell_input_unicode_resize_and_exit` 回归会在测试子会话中先设置代码页 437，再显式设置 UTF-8 后输出中文；这用于消除系统区域设置对 `[Console]::WriteLine` 的影响，不修改系统全局编码。命令回显不能代替实际中文输出断言。可单独运行 `cargo test --locked -p rshell-core local::tests::powershell_input_unicode_resize_and_exit -- --exact`。
+
 ## 准备
 
 1. 使用 Windows x64，安装 Rust 的 MSVC 工具链和 MSVC/Windows SDK。当前开发验证使用 Rust 1.98.1。
