@@ -247,6 +247,31 @@ async fn run(
     events: mpsc::Sender<Event>,
     published: Arc<Mutex<Weak<SharedSession>>>,
 ) -> Result<()> {
+    let (session, incoming) = authenticate(&profile, secret, config, events.clone()).await?;
+    *published.lock().unwrap() = Arc::downgrade(&session);
+    if !profile.tunnel_only && !profile.tunnels.iter().any(|r| r.enabled) {
+        return run_channel(session, terminal, commands, events).await;
+    }
+    let mut tunnels =
+        crate::tunnel::Tunnels::start(session.clone(), profile.tunnels, incoming, &events).await?;
+    if profile.tunnel_only {
+        events.send(Event::Connected).await?;
+        tunnels.run(&events).await
+    } else {
+        tokio::select! {
+            biased;
+            result = run_channel(session, terminal, commands, events.clone()) => result,
+            result = tunnels.run(&events) => result,
+        }
+    }
+}
+
+pub(crate) async fn authenticate(
+    profile: &Profile,
+    secret: Zeroizing<String>,
+    config: Config,
+    events: mpsc::Sender<Event>,
+) -> Result<(Arc<SharedSession>, mpsc::Receiver<crate::tunnel::Forwarded>)> {
     profile.validate()?;
     events
         .send(Event::Status("连接中 / 校验主机身份".into()))
@@ -327,25 +352,10 @@ async fn run(
 
     let session = Arc::new(SharedSession(
         Arc::new(session),
-        profile.keep_alive,
+        profile.keep_alive.clone(),
         activity,
     ));
-    *published.lock().unwrap() = Arc::downgrade(&session);
-    if !profile.tunnel_only && !profile.tunnels.iter().any(|r| r.enabled) {
-        return run_channel(session, terminal, commands, events).await;
-    }
-    let mut tunnels =
-        crate::tunnel::Tunnels::start(session.clone(), profile.tunnels, incoming, &events).await?;
-    if profile.tunnel_only {
-        events.send(Event::Connected).await?;
-        tunnels.run(&events).await
-    } else {
-        tokio::select! {
-            biased;
-            result = run_channel(session, terminal, commands, events.clone()) => result,
-            result = tunnels.run(&events) => result,
-        }
-    }
+    Ok((session, incoming))
 }
 
 async fn run_channel(

@@ -4,8 +4,10 @@ pub mod claude_agent;
 pub mod config;
 #[cfg(windows)]
 pub mod credentials;
+pub mod headless;
 pub mod jumpserver;
 pub mod rsh;
+pub mod session_tree;
 pub mod ssh;
 pub mod store;
 pub mod telnet;
@@ -16,6 +18,7 @@ pub mod connection;
 pub mod local;
 
 pub mod serial;
+pub mod sftp_sync;
 
 pub mod transfer;
 pub mod tunnel;

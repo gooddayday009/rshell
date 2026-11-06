@@ -52,6 +52,7 @@ pub struct Browser {
     column_split: f32,
     queue_split: f32,
     task_filter: usize,
+    name_filters: [String; 2],
 }
 impl Default for Browser {
     fn default() -> Self {
@@ -77,8 +78,98 @@ impl Default for Browser {
             column_split: 0.5,
             queue_split: 0.55,
             task_filter: 0,
+            name_filters: Default::default(),
         }
     }
+}
+fn visible_entries(entries: &[Entry], query: &str) -> Vec<usize> {
+    let query = query.trim().to_lowercase();
+    entries
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| e.name.to_lowercase().contains(&query).then_some(i))
+        .collect()
+}
+fn file_row(ui: &mut egui::Ui, entry: &Entry, selected: bool, index: usize) -> egui::Response {
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 25.0), egui::Sense::hover());
+    let response = ui
+        .interact(
+            rect,
+            ui.scope_id().with(("file-row", index)),
+            egui::Sense::click_and_drag(),
+        )
+        .on_hover_text(&entry.name);
+    let active = selected || response.clicked();
+    if active || response.hovered() {
+        ui.painter().rect_filled(
+            rect,
+            3.0,
+            if active {
+                ui.visuals().selection.bg_fill
+            } else {
+                ui.visuals().widgets.hovered.bg_fill
+            },
+        );
+    }
+    let folder_color = if ui.visuals().dark_mode {
+        egui::Color32::from_rgb(241, 193, 89)
+    } else {
+        egui::Color32::from_rgb(143, 96, 12)
+    };
+    let color = if active {
+        ui.visuals().selection.stroke.color
+    } else if entry.directory {
+        folder_color
+    } else {
+        ui.visuals().text_color()
+    };
+    composer_icons::image(
+        if entry.directory {
+            Icon::Folder
+        } else {
+            Icon::File
+        },
+        color,
+    )
+    .paint_at(
+        ui,
+        egui::Rect::from_center_size(
+            egui::pos2(rect.left() + 11.0, rect.center().y),
+            egui::vec2(14.0, 14.0),
+        ),
+    );
+    let metadata = if entry.directory {
+        "文件夹".into()
+    } else {
+        format!("{} · {}", file_kind(&entry.name), size(entry.size))
+    };
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let metadata_width = (rect.width() * 0.43).min(135.0);
+    let name_width = (rect.width() - metadata_width - 32.0).max(10.0);
+    for (text, x, width, text_color) in [
+        (&entry.name, rect.left() + 24.0, name_width, color),
+        (
+            &metadata,
+            rect.right() - metadata_width,
+            metadata_width - 4.0,
+            if active || entry.directory {
+                color
+            } else {
+                ui.visuals().weak_text_color()
+            },
+        ),
+    ] {
+        let mut job = egui::text::LayoutJob::simple(text.clone(), font.clone(), text_color, width);
+        job.wrap.max_rows = 1;
+        let galley = ui.painter().layout_job(job);
+        ui.painter().galley(
+            egui::pos2(x, rect.center().y - galley.size().y / 2.0),
+            galley,
+            text_color,
+        );
+    }
+    response
 }
 fn display_local_path(path: &std::path::Path) -> String {
     let text = path.to_string_lossy();
@@ -546,11 +637,37 @@ impl Browser {
                                 local_nav = Some(PathBuf::from(&self.local_path));
                             }
                         }
+                        ui.horizontal(|ui| {
+                            let changed = ui
+                                .add(
+                                    egui::TextEdit::singleline(&mut self.name_filters[index])
+                                        .hint_text("查找当前目录文件名…")
+                                        .desired_width((ui.available_width() - 48.0).max(60.0)),
+                                )
+                                .changed();
+                            let clear = ui
+                                .add_enabled(
+                                    !self.name_filters[index].is_empty(),
+                                    egui::Button::new("清除"),
+                                )
+                                .clicked();
+                            if clear {
+                                self.name_filters[index].clear();
+                            }
+                            if changed || clear {
+                                if remote {
+                                    self.remote_selected = None;
+                                } else {
+                                    self.local_selected = None;
+                                }
+                            }
+                        });
                         let entries = if remote {
                             &self.entries
                         } else {
                             &self.local_entries
                         };
+                        let visible = visible_entries(entries, &self.name_filters[index]);
                         let selected = if remote {
                             &mut self.remote_selected
                         } else {
@@ -574,114 +691,44 @@ impl Browser {
                                 egui::ScrollArea::vertical()
                                     .id_salt("files")
                                     .max_height(browser_height - 30.0)
-                                    .show_rows(ui, 25.0, entries.len(), |ui, range| {
-                                        for i in range {
+                                    .show_rows(ui, 25.0, visible.len(), |ui, range| {
+                                        for visible_index in range {
+                                            let i = visible[visible_index];
                                             let entry = &entries[i];
-                                            ui.horizontal(|ui| {
-                                                let folder_color = if ui.visuals().dark_mode {
-                                                    egui::Color32::from_rgb(241, 193, 89)
-                                                } else {
-                                                    egui::Color32::from_rgb(143, 96, 12)
-                                                };
-                                                let color = if entry.directory {
-                                                    folder_color
-                                                } else {
-                                                    ui.visuals().weak_text_color()
-                                                };
-                                                ui.add(composer_icons::image(
-                                                    if entry.directory {
-                                                        Icon::Folder
-                                                    } else {
-                                                        Icon::File
-                                                    },
-                                                    color,
-                                                ));
-                                                let response = ui
-                                                    .allocate_ui_with_layout(
-                                                        egui::vec2(
-                                                            (ui.available_width() - 135.0)
-                                                                .max(40.0),
-                                                            23.0,
-                                                        ),
-                                                        egui::Layout::left_to_right(
-                                                            egui::Align::Center,
-                                                        ),
-                                                        |ui| {
-                                                            ui.add(
-                                                                    egui::Button::new(
-                                                                        if entry.directory {
-                                                                            egui::RichText::new(
-                                                                                &entry.name,
-                                                                            )
-                                                                            .strong()
-                                                                            .color(color)
-                                                                        } else {
-                                                                            egui::RichText::new(
-                                                                                &entry.name,
-                                                                            )
-                                                                        },
-                                                                    )
-                                                                    .truncate()
-                                                                    .selected(*selected == Some(i))
-                                                                    .frame(false)
-                                                                    .sense(
-                                                                        egui::Sense::click_and_drag(
-                                                                        ),
-                                                                    ),
-                                                                )
-                                                        },
-                                                    )
-                                                    .inner
-                                                    .on_hover_text(&entry.name);
-                                                if response.clicked() {
-                                                    *selected = Some(i);
-                                                }
-                                                let path = if remote {
-                                                    format!(
-                                                        "{}/{}",
-                                                        self.remote_dir.trim_end_matches('/'),
-                                                        entry.name
-                                                    )
-                                                } else {
-                                                    self.local_dir
-                                                        .join(&entry.name)
-                                                        .to_string_lossy()
-                                                        .into_owned()
-                                                };
-                                                response.dnd_set_drag_payload(DragEntry {
-                                                    remote,
-                                                    path: path.clone(),
-                                                    name: entry.name.clone(),
-                                                });
-                                                if response.double_clicked() && entry.directory {
-                                                    if remote {
-                                                        remote_nav = Some(path);
-                                                    } else {
-                                                        local_nav = Some(PathBuf::from(path));
-                                                    }
-                                                }
-                                                ui.with_layout(
-                                                    egui::Layout::right_to_left(
-                                                        egui::Align::Center,
-                                                    ),
-                                                    |ui| {
-                                                        ui.label(if entry.directory {
-                                                            egui::RichText::new("文件夹")
-                                                                .strong()
-                                                                .color(folder_color)
-                                                        } else {
-                                                            egui::RichText::new(format!(
-                                                                "{} · {}",
-                                                                file_kind(&entry.name),
-                                                                size(entry.size)
-                                                            ))
-                                                            .weak()
-                                                        });
-                                                    },
-                                                );
+                                            let response =
+                                                file_row(ui, entry, *selected == Some(i), i);
+                                            if response.clicked() {
+                                                *selected = Some(i);
+                                            }
+                                            let path = if remote {
+                                                format!(
+                                                    "{}/{}",
+                                                    self.remote_dir.trim_end_matches('/'),
+                                                    entry.name
+                                                )
+                                            } else {
+                                                self.local_dir
+                                                    .join(&entry.name)
+                                                    .to_string_lossy()
+                                                    .into_owned()
+                                            };
+                                            response.dnd_set_drag_payload(DragEntry {
+                                                remote,
+                                                path: path.clone(),
+                                                name: entry.name.clone(),
                                             });
+                                            if response.double_clicked() && entry.directory {
+                                                if remote {
+                                                    remote_nav = Some(path);
+                                                } else {
+                                                    local_nav = Some(PathBuf::from(path));
+                                                }
+                                            }
                                         }
                                     });
+                                if visible.is_empty() && !entries.is_empty() {
+                                    ui.weak("没有匹配的文件或文件夹");
+                                }
                                 if entries.is_empty() {
                                     ui.weak("目录为空或尚未加载");
                                 }
@@ -720,11 +767,15 @@ impl Browser {
                                 }
                             }
                         }
-                        ui.label(if remote {
-                            &self.status
+                        if !self.name_filters[index].is_empty() {
+                            ui.label(format!("匹配 {} / {} 项", visible.len(), entries.len()));
                         } else {
-                            &self.local_status
-                        });
+                            ui.label(if remote {
+                                &self.status
+                            } else {
+                                &self.local_status
+                            });
+                        }
                     },
                 );
             }
@@ -1107,5 +1158,119 @@ mod tests {
             display_local_path(std::path::Path::new(r"\\?\C:\Users\demo\Desktop")),
             r"C:\Users\demo\Desktop"
         );
+    }
+    #[test]
+    fn clicking_icon_name_and_metadata_selects_whole_row() {
+        let entry = Entry {
+            name: "example.txt".into(),
+            directory: false,
+            size: 1024,
+        };
+        for dark in [false, true] {
+            let ctx = egui::Context::default();
+            egui_extras::install_image_loaders(&ctx);
+            ctx.set_visuals(if dark {
+                egui::Visuals::dark()
+            } else {
+                egui::Visuals::light()
+            });
+            let mut selected = false;
+            let frame = |events, selected: &mut bool| {
+                let mut rect = egui::Rect::NOTHING;
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(400.0, 200.0),
+                        )),
+                        events,
+                        ..Default::default()
+                    },
+                    |root| {
+                        egui::CentralPanel::default().show(root, |ui| {
+                            let r = file_row(ui, &entry, *selected, 0);
+                            rect = r.rect;
+                            if r.clicked() {
+                                *selected = true;
+                            }
+                        });
+                    },
+                );
+                output.textures_delta.clear();
+                rect
+            };
+            let rect = frame(vec![], &mut selected);
+            for x in [rect.left() + 10.0, rect.left() + 70.0, rect.right() - 20.0] {
+                selected = false;
+                let pos = egui::pos2(x, rect.center().y);
+                frame(vec![egui::Event::PointerMoved(pos)], &mut selected);
+                for pressed in [true, false] {
+                    frame(
+                        vec![egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        }],
+                        &mut selected,
+                    );
+                }
+                assert!(selected, "click x={x} dark={dark}");
+            }
+        }
+    }
+    #[test]
+    fn filename_search_maps_results_to_original_entries() {
+        let mut browser = Browser::default();
+        browser.smoke_fixture();
+        assert_eq!(visible_entries(&browser.entries, "TOML"), vec![2]);
+        assert_eq!(visible_entries(&browser.entries, "备份"), vec![1]);
+        assert!(visible_entries(&browser.entries, "nonexistent").is_empty());
+        assert_eq!(visible_entries(&browser.entries, ""), vec![0, 1, 2, 3]);
+        browser.name_filters = ["TOML".into(), "LOG".into()];
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        let id = uuid::Uuid::new_v4();
+        let frame = |browser: &mut Browser, events| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1180.0, 780.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |_| browser.show(&ctx, runtime.handle(), None, id, "test"),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        for _ in 0..3 {
+            frame(&mut browser, vec![]);
+        }
+        let output = frame(&mut browser, vec![]);
+        let pos = output
+            .shapes
+            .iter()
+            .find_map(|s| composer_icons::find_text(&s.shape, "TOML · 4.1 KB"))
+            .unwrap()
+            .visual_bounding_rect()
+            .center();
+        frame(&mut browser, vec![egui::Event::PointerMoved(pos)]);
+        for pressed in [true, false] {
+            frame(
+                &mut browser,
+                vec![egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            );
+        }
+        assert_eq!(browser.remote_selected, Some(2));
+        assert_eq!(browser.local_selected, None);
     }
 }

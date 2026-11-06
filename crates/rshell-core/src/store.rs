@@ -7,6 +7,7 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 pub enum Action {
+    CliEnabled(bool),
     ScrollbackLines(usize),
     ChromeVisibility(crate::config::ChromeVisibility),
     SaveJumpServer(crate::jumpserver::Saved),
@@ -55,6 +56,10 @@ pub enum Action {
     MoveProfile {
         id: Uuid,
         folder_id: Option<Uuid>,
+    },
+    MoveSession {
+        item: crate::session_tree::Item,
+        placement: crate::session_tree::Placement,
     },
     ReadSecret(Uuid),
     ReadAiKey(Uuid),
@@ -422,6 +427,9 @@ impl<C: Credentials> State<C> {
                     bail!("只能删除空文件夹，请先移动会话和子文件夹");
                 }
                 candidate.folders.retain(|f| f.id != id);
+                candidate
+                    .session_order
+                    .retain(|v| *v != crate::session_tree::Item::Folder(id));
             }
             Action::KeepAlive { id, settings } => {
                 settings.validate()?;
@@ -435,6 +443,11 @@ impl<C: Credentials> State<C> {
                 }
                 profile.keep_alive = settings;
             }
+            Action::MoveSession { item, placement } => {
+                if let Some(moved) = self.config.moved_session(item, placement)? {
+                    candidate = moved;
+                }
+            }
             Action::MoveProfile { id, folder_id } => {
                 candidate
                     .profiles
@@ -445,6 +458,9 @@ impl<C: Credentials> State<C> {
             }
             Action::DeleteProfile(id) => {
                 candidate.profiles.retain(|profile| profile.id != id);
+                candidate
+                    .session_order
+                    .retain(|v| *v != crate::session_tree::Item::Profile(id));
                 candidate.recent.retain(|recent| *recent != id);
                 candidate
                     .shortcut_profiles
@@ -459,6 +475,7 @@ impl<C: Credentials> State<C> {
                 candidate.scrollback_lines = lines;
             }
             Action::ChromeVisibility(chrome) => candidate.chrome = chrome,
+            Action::CliEnabled(enabled) => candidate.cli_enabled = enabled,
             Action::Preferences {
                 font_size,
                 terminal_font,
@@ -1181,6 +1198,61 @@ mod tests {
     }
 
     #[test]
+    fn session_reorder_commits_atomically_and_preserves_credentials() {
+        use crate::session_tree::{Item, Placement};
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target");
+        let temp = tempfile::tempdir_in(root).unwrap();
+        let p = valid_profile();
+        let q = Profile {
+            name: "second".into(),
+            ..valid_profile()
+        };
+        let mut state = State {
+            path: temp.path().join("config.json"),
+            config: Config {
+                profiles: vec![p.clone(), q.clone()],
+                ..Default::default()
+            },
+            credentials: FakeCredentials::default(),
+        };
+        state
+            .credentials
+            .write(p.id, "synthetic-test-secret")
+            .unwrap();
+        state
+            .apply(Action::MoveSession {
+                item: Item::Profile(q.id),
+                placement: Placement::Before(Item::Profile(p.id)),
+            })
+            .unwrap();
+        let expected = vec![Item::Profile(q.id), Item::Profile(p.id)];
+        assert_eq!(
+            Config::load(&state.path).unwrap().session_children(None),
+            expected
+        );
+        assert_eq!(
+            state.credentials.read(p.id).unwrap().unwrap().as_str(),
+            "synthetic-test-secret"
+        );
+        // The existing atomic-save path must not publish a failed move to memory.
+        std::fs::remove_file(state.path.with_extension("json.bak")).ok();
+        std::fs::create_dir(state.path.with_extension("json.bak")).unwrap();
+        assert!(
+            state
+                .apply(Action::MoveSession {
+                    item: Item::Profile(p.id),
+                    placement: Placement::Before(Item::Profile(q.id))
+                })
+                .is_err()
+        );
+        assert_eq!(state.config.session_children(None), expected);
+        assert_eq!(
+            Config::load(&state.path).unwrap().session_children(None),
+            expected
+        );
+    }
+
+    #[test]
     fn verified_rotation_revokes_old_key_and_rejects_stale_changes() {
         let temp = tempfile::tempdir().unwrap();
         let old = host();
@@ -1446,6 +1518,10 @@ mod tests {
             config: Config::default(),
             credentials: FakeCredentials::default(),
         };
+        state.apply(Action::CliEnabled(true)).unwrap();
+        assert!(Config::load(&state.path).unwrap().cli_enabled);
+        state.apply(Action::CliEnabled(false)).unwrap();
+        assert!(!Config::load(&state.path).unwrap().cli_enabled);
         state.apply(Action::ScrollbackLines(20000)).unwrap();
         let hidden = crate::config::ChromeVisibility {
             menu: false,

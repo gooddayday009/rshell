@@ -33,6 +33,8 @@ Remove-Item Env:RSHELL_CONFIG_DIR
 
 终端查找栏单场景窗口验证：构建后，以隔离的 `RSHELL_CONFIG_DIR` 和 `target` 下的 `RSHELL_SCREENSHOT` 运行 `target/debug/rshell.exe --demo --smoke-test --smoke-terminal-search`，自动打开 800×520 窗口及右上角查找栏，检查小字号与窄窗口布局后自动退出。
 
+退出确认框单场景窗口验证：使用隔离配置和 `target` 下的截图路径，运行 `target/debug/rshell.exe --demo --smoke-test --smoke-confirm-exit`，在 800×520 窗口内检查弹窗留白、提示文字和右对齐按钮。隔离配置中的 `light_theme` 分别设为 `false` / `true`，检查深浅主题；加 `--smoke-tree-narrow` 检查 180 px 窄侧栏。场景自动打开弹窗并退出，不连接服务器，不代表真实会话断开验收。
+
 ## B. 本机 SSH 手动连接
 
 SSH 隧道自动化验证使用 `cargo test --locked -p rshell-core --test tunnels`。仅使用回环地址上的 russh 和 TCP 测试服务，不连接生产服务器。测试服务不提供 Shell，以验证仅隧道模式。
@@ -93,6 +95,9 @@ cargo run --locked -p rshell-core --example local_ssh_server -- 2223
 | `cargo clippy --locked --workspace --all-targets -- -D warnings` | 含示例与测试的严格静态检查 |
 | `cargo test --locked --workspace --all-targets` | GUI 事件、配置与终端模型、SSH 集成测试 |
 | `cargo test --locked -p rshell-core --test ssh_loopback` | 单独运行 SSH 协议测试 |
+| `cargo test --locked -p rshell-core --test headless` | 无界面 exec/SFTP、主机信任与密钥认证回环测试 |
+| `cargo test --locked -p rshell-core --test sftp_sync` | 目录递归/预览/镜像、内容变化、写入失败与路径冲突保护 |
+| `cargo test --locked -p rshell --bin rshell-cli --test cli` | CLI 参数、实际子进程输出/退出码、SFTP 与超时回环测试 |
 | `cargo test --locked -p rshell --bin rshell` | GUI 键盘/IME 事件、粘贴与弹窗隔离 |
 | `cargo test --locked -p rshell-terminal` | UTF-8 分片、ANSI、备用屏幕、查询回复、历史搜索 |
 
@@ -439,3 +444,10 @@ try {
 SFTP 从内嵌 egui Window 改为 immediate 原生 viewport，独立标题栏、移动、缩放和关闭。系统窗口外框不依赖内容自动适配高度；队列禁用自动收缩，避免空队列/筛选后底边随内容变化。关闭 SFTP 窗口保留会话内任务，重新打开可查看；退出主程序仍结束任务。打开 SFTP 不再阻塞主窗口终端输入。后端不支持多窗口时才使用 egui 嵌入回退。
 
 本机原生窗口验证：找到独立顶层 HWND（非 WS_CHILD），移动到指定桌面坐标，调整到 900×650，跨帧检查坐标尺寸稳定，并确认主窗口没有跟随移动。证据：`target/test-artifacts/sftp-native-verification.txt`。此验证使用演示数据，不连接生产。真实多显示器不同 DPI、用户所见鼠标拖动手感仍需实际验收。
+
+
+### SFTP 点击选中与查找修正（2026-11-06）
+
+文件列表改为单一整行点击/拖动响应区，图标、名称、大小和空白均可选中，整行显示主题选中背景。左右栏提供独立的当前目录文件名筛选框（大小写不敏感、中文子串匹配），显示匹配数和无匹配提示；改动查询清除旧选择，筛选后的行保留原条目索引，上传/下载/双击/拖动均对应正确文件。查找不递归遍历子目录，也不搜索文件内容。
+
+针对性测试：`cargo test --locked -p rshell transfer_view` 验证深浅主题图标/名称/大小位置点击、中文与大小写查找、过滤后选择索引、跨栏拖放及原有布局。

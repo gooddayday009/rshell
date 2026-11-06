@@ -12,6 +12,7 @@ try {
     Invoke-Cargo @('clippy', '--locked', '--workspace', '--all-targets', '--', '-D', 'warnings')
     Invoke-Cargo @('test', '--locked', '--workspace', '--all-targets')
     if ($WithCredentials) {
+        Invoke-Cargo @('test', '--locked', '-p', 'rshell', '--test', 'cli', 'cli_saved_credentials_read_without_password_arguments', '--', '--ignored')
         Invoke-Cargo @('test', '--locked', '-p', 'rshell-core', 'encrypted_credentials_roundtrip')
         Invoke-Cargo @('test', '--locked', '-p', 'rshell-core', 'jumpserver_credentials_roundtrip', '--', '--ignored')
         Invoke-Cargo @('test', '--locked', '-p', 'rshell', 'saved_password_auto_auth_mfa_and_failure_stop', '--', '--ignored')

@@ -6,6 +6,9 @@ use std::{
 #[derive(Default)]
 pub struct Sftp {
     pub files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    pub attributes: Arc<Mutex<HashMap<String, FileAttributes>>>,
+    pub disable_posix_rename: bool,
+    pub fail_writes: bool,
     listed: bool,
 }
 fn ok(id: u32) -> Status {
@@ -22,7 +25,13 @@ impl russh_sftp::server::Handler for Sftp {
         StatusCode::OpUnsupported
     }
     async fn init(&mut self, _: u32, _: HashMap<String, String>) -> Result<Version, StatusCode> {
-        Ok(Version::new())
+        let mut version = Version::new();
+        if !self.disable_posix_rename {
+            version
+                .extensions
+                .insert("posix-rename@openssh.com".into(), "1".into());
+        }
+        Ok(version)
     }
     async fn lstat(&mut self, id: u32, path: String) -> Result<Attrs, StatusCode> {
         self.stat(id, path).await
@@ -31,6 +40,12 @@ impl russh_sftp::server::Handler for Sftp {
         self.stat(id, handle).await
     }
     async fn stat(&mut self, id: u32, path: String) -> Result<Attrs, StatusCode> {
+        if let Some(attrs) = self.attributes.lock().unwrap().get(&path) {
+            return Ok(Attrs {
+                id,
+                attrs: attrs.clone(),
+            });
+        }
         let files = self.files.lock().unwrap();
         let dir = path == "/" || files.contains_key(&format!("{}/", path.trim_end_matches('/')));
         let size = if dir {
@@ -58,6 +73,58 @@ impl russh_sftp::server::Handler for Sftp {
             .unwrap()
             .insert(format!("{}/", path.trim_end_matches('/')), vec![]);
         Ok(ok(id))
+    }
+    async fn remove(&mut self, id: u32, path: String) -> Result<Status, StatusCode> {
+        self.files
+            .lock()
+            .unwrap()
+            .remove(&path)
+            .ok_or(StatusCode::NoSuchFile)?;
+        Ok(ok(id))
+    }
+    async fn rmdir(&mut self, id: u32, path: String) -> Result<Status, StatusCode> {
+        let path = format!("{}/", path.trim_end_matches('/'));
+        let mut files = self.files.lock().unwrap();
+        if files.keys().any(|p| p != &path && p.starts_with(&path)) {
+            return Err(StatusCode::Failure);
+        }
+        files.remove(&path).ok_or(StatusCode::NoSuchFile)?;
+        Ok(ok(id))
+    }
+    async fn extended(
+        &mut self,
+        id: u32,
+        request: String,
+        data: Vec<u8>,
+    ) -> Result<Packet, StatusCode> {
+        if self.disable_posix_rename || request != "posix-rename@openssh.com" {
+            return Err(StatusCode::OpUnsupported);
+        }
+        let mut data = data.as_slice();
+        let mut string = || -> Result<String, StatusCode> {
+            if data.len() < 4 {
+                return Err(StatusCode::BadMessage);
+            }
+            let len = u32::from_be_bytes(data[..4].try_into().unwrap()) as usize;
+            data = &data[4..];
+            if data.len() < len {
+                return Err(StatusCode::BadMessage);
+            }
+            let text = std::str::from_utf8(&data[..len])
+                .map_err(|_| StatusCode::BadMessage)?
+                .to_owned();
+            data = &data[len..];
+            Ok(text)
+        };
+        let old = string()?;
+        let new = string()?;
+        if !data.is_empty() {
+            return Err(StatusCode::BadMessage);
+        }
+        let mut files = self.files.lock().unwrap();
+        let bytes = files.remove(&old).ok_or(StatusCode::NoSuchFile)?;
+        files.insert(new, bytes);
+        Ok(Packet::Status(ok(id)))
     }
     async fn close(&mut self, id: u32, _: String) -> Result<Status, StatusCode> {
         Ok(ok(id))
@@ -112,6 +179,9 @@ impl russh_sftp::server::Handler for Sftp {
         offset: u64,
         data: Vec<u8>,
     ) -> Result<Status, StatusCode> {
+        if self.fail_writes {
+            return Err(StatusCode::PermissionDenied);
+        }
         if handle.starts_with("/slow") {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
@@ -181,6 +251,9 @@ impl Sftp {
         Self {
             files,
             listed: false,
+            attributes: Default::default(),
+            disable_posix_rename: false,
+            fail_writes: false,
         }
     }
 }
@@ -188,6 +261,7 @@ impl Sftp {
 pub fn tempdir() -> tempfile::TempDir {
     let root =
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/test-artifacts");
+    let root = std::path::absolute(root).unwrap();
     std::fs::create_dir_all(&root).unwrap();
     tempfile::tempdir_in(root).unwrap()
 }

@@ -8,6 +8,9 @@
 !ifndef SOURCE_EXE
   !error "SOURCE_EXE is required"
 !endif
+!ifndef SOURCE_CLI
+  !error "SOURCE_CLI is required"
+!endif
 !ifndef OUTPUT_DIR
   !error "OUTPUT_DIR is required"
 !endif
@@ -65,6 +68,7 @@ Section "RShell" Main
   done_inno:
   SetOutPath "$INSTDIR"
   File /oname=rshell.exe "${SOURCE_EXE}"
+  File /oname=rshell-cli.exe "${SOURCE_CLI}"
 !ifdef AGENT_SDK_DIR
   SetOutPath "$INSTDIR\agent-sdk"
   File /r "${AGENT_SDK_DIR}\*"
@@ -77,6 +81,8 @@ Section "RShell" Main
   File "${PROJECT_ROOT}\docs\AGENT_COMPONENT.md"
   File "${PROJECT_ROOT}\docs\SHORTCUTS.md"
   File "${PROJECT_ROOT}\docs\TUNNELS.md"
+  File "${PROJECT_ROOT}\docs\CLI.md"
+  File "${PROJECT_ROOT}\docs\SESSION_TREE.md"
   File "${PROJECT_ROOT}\docs\STATUS.md"
   SetOutPath "$INSTDIR\licenses"
   File /oname=Geist-OFL.txt "${PROJECT_ROOT}\crates\rshell-app\assets\fonts\LICENSE.txt"
@@ -108,6 +114,7 @@ Section "Uninstall"
   Delete "$SMPROGRAMS\RShell\RShell.lnk"
   RMDir "$SMPROGRAMS\RShell"
   Delete "$INSTDIR\rshell.exe"
+  Delete "$INSTDIR\rshell-cli.exe"
   RMDir /r "$INSTDIR\agent-sdk"
   Delete "$INSTDIR\README.md"
   Delete "$INSTDIR\LICENSE"
@@ -116,6 +123,8 @@ Section "Uninstall"
   Delete "$INSTDIR\docs\AGENT_COMPONENT.md"
   Delete "$INSTDIR\docs\SHORTCUTS.md"
   Delete "$INSTDIR\docs\TUNNELS.md"
+  Delete "$INSTDIR\docs\CLI.md"
+  Delete "$INSTDIR\docs\SESSION_TREE.md"
   RMDir "$INSTDIR\docs"
   Delete "$INSTDIR\licenses\Geist-OFL.txt"
   Delete "$INSTDIR\licenses\Lucide.txt"

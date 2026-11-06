@@ -9,7 +9,9 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Release build failed (exit $LASTEXITCODE)" }
     if ($WithAgent) { & (Join-Path $PSScriptRoot 'build-agent-sdk.ps1') -OutputDirectory (Join-Path $buildDirectory 'release') }
     $executable = Join-Path $buildDirectory 'release\rshell.exe'
+    $cliExecutable = Join-Path $buildDirectory 'release\rshell-cli.exe'
     Write-Host "Executable: $executable"
+    Write-Host "CLI: $cliExecutable"
     if ($Package) {
         $distDirectory = Join-Path $projectRoot 'dist'
         $version = [regex]::Match((Get-Content 'Cargo.toml' -Raw), '(?ms)^\[workspace\.package\]\s*.*?^version\s*=\s*"([^"]+)"').Groups[1].Value
@@ -21,6 +23,7 @@ try {
         New-Item -ItemType Directory -Path (Join-Path $bundleDirectory 'licenses') -Force | Out-Null
         New-Item -ItemType Directory -Path (Join-Path $bundleDirectory 'packaging\windows') -Force | Out-Null
         Copy-Item -LiteralPath $executable -Destination $bundleDirectory
+        Copy-Item -LiteralPath $cliExecutable -Destination $bundleDirectory
         if ($WithAgent) { Copy-Item -LiteralPath (Join-Path $buildDirectory 'release\agent-sdk') -Destination $bundleDirectory -Recurse }
         Copy-Item -LiteralPath (Join-Path $projectRoot 'README.md') -Destination $bundleDirectory
         Copy-Item -LiteralPath (Join-Path $projectRoot 'LICENSE') -Destination $bundleDirectory

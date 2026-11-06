@@ -1,5 +1,7 @@
 # RShell Windows 便携测试版
 
+脚本自动化使用同目录的 `rshell-cli.exe`，默认关闭，需在“设置 → 会话”启用。支持 SSH 命令、SFTP 单文件上传/下载及 `sftp sync upload/download` 目录同步，不依赖系统 OpenSSH。执行 `./rshell-cli.exe --help` 或阅读 `docs/CLI.md`。目录同步默认保留目标多余文件，只有显式 `--delete` 才删除，可先用 `--dry-run` 预览；CLI 不监听网络端口、不自动加入 PATH。
+
 解压整个 ZIP 后双击 `rshell.exe` 启动，无需安装 Rust。轻量包不含 Agent 组件；首次执行型 Agent 使用时可选择下载或使用本机组件。full 离线包的组件位于旁边的 `agent-sdk` 目录，请保留完整目录。两种方式均无需另外安装 Python 或 CLI。Agent 仍需要有效的 API 认证配置。
 
 启动后主区域默认显示本地 PowerShell，可直接输入 `ssh root@主机`。命令行 SSH 需要系统安装 OpenSSH 客户端；其主机记录与内置会话独立。

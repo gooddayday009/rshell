@@ -283,6 +283,9 @@ pub struct Folder {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Config {
+    /// Local CLI opt-in; not an authorization boundary against the same OS user.
+    #[serde(default)]
+    pub cli_enabled: bool,
     #[serde(default)]
     pub jumpserver: Option<crate::jumpserver::Saved>,
     #[serde(default)]
@@ -291,6 +294,9 @@ pub struct Config {
     pub profiles: Vec<Profile>,
     #[serde(default)]
     pub folders: Vec<Folder>,
+    /// Manual sibling order; absent entries keep the legacy folder/name ordering.
+    #[serde(default)]
+    pub session_order: Vec<crate::session_tree::Item>,
     pub known_hosts: Vec<KnownHost>,
     #[serde(default = "default_scrollback_lines")]
     pub scrollback_lines: usize,
@@ -628,10 +634,12 @@ fn default_ui_zoom() -> f32 {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            cli_enabled: false,
             schema_version: 4,
             jumpserver: None,
             ai: Default::default(),
             folders: vec![],
+            session_order: vec![],
             profiles: vec![],
             known_hosts: vec![],
             scrollback_lines: default_scrollback_lines(),
@@ -830,6 +838,17 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cli_is_opt_in_for_new_and_legacy_configs() {
+        assert!(!super::Config::default().cli_enabled);
+        let mut legacy = serde_json::to_value(super::Config::default()).unwrap();
+        legacy.as_object_mut().unwrap().remove("cli_enabled");
+        assert!(
+            !serde_json::from_value::<super::Config>(legacy)
+                .unwrap()
+                .cli_enabled
+        );
+    }
     #[test]
     fn sidebar_zoom_defaults_for_legacy_configs() {
         let mut value = serde_json::to_value(super::Config::default()).unwrap();

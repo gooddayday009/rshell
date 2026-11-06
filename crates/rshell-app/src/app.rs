@@ -9,6 +9,8 @@ mod ai_settings;
 mod jumpserver_view;
 #[path = "key_manager.rs"]
 mod key_manager;
+#[path = "session_tree.rs"]
+mod session_tree;
 #[path = "settings_view.rs"]
 mod settings_view;
 #[path = "transfer_view.rs"]
@@ -16,6 +18,7 @@ mod transfer_view;
 #[path = "update_view.rs"]
 mod update_view;
 use eframe::egui::{self, Color32, RichText};
+use rshell_core::session_tree::Item as SessionDrag;
 use rshell_core::{
     config::{
         AuthMethod, Config, Folder, KnownHost, Profile, Protocol, SerialFlowControl, SerialParity,
@@ -134,89 +137,6 @@ fn folder_matches(config: &Config, id: Uuid, filter: &str) -> bool {
             .folders
             .iter()
             .any(|f| f.parent_id == Some(id) && folder_matches(config, f.id, filter))
-}
-
-#[derive(Clone, Copy)]
-enum SessionDrag {
-    Folder(Uuid),
-    Profile(Uuid),
-}
-
-fn move_action(config: &Config, item: SessionDrag, destination: Option<Uuid>) -> Option<Action> {
-    match item {
-        SessionDrag::Profile(id) => {
-            let profile = config.profiles.iter().find(|p| p.id == id)?;
-            (profile.folder_id != destination).then_some(Action::MoveProfile {
-                id,
-                folder_id: destination,
-            })
-        }
-        SessionDrag::Folder(id) => {
-            let mut updated = config.folders.iter().find(|f| f.id == id)?.clone();
-            if updated.parent_id == destination {
-                return None;
-            }
-            updated.parent_id = destination;
-            let mut candidate = config.clone();
-            *candidate.folders.iter_mut().find(|f| f.id == id)? = updated.clone();
-            candidate.validate_folders().ok()?;
-            Some(Action::SaveFolder(updated))
-        }
-    }
-}
-
-fn folder_drop(
-    ui: &mut egui::Ui,
-    response: &egui::Response,
-    config: &Config,
-    destination: Option<Uuid>,
-) -> Option<Action> {
-    let payload = response.dnd_hover_payload::<SessionDrag>()?;
-    let action = move_action(config, *payload, destination)?;
-    ui.painter().rect_stroke(
-        response.rect.shrink(1.0),
-        3.0,
-        egui::Stroke::new(2.0, ui.visuals().selection.bg_fill),
-        egui::StrokeKind::Inside,
-    );
-    response.dnd_release_payload::<SessionDrag>()?;
-    Some(action)
-}
-
-fn folder_icon(ui: &mut egui::Ui, openness: f32, response: &egui::Response) {
-    let painter = ui.painter();
-    let x = response.rect.left() - 2.0;
-    let y = response.rect.center().y;
-    let stroke = egui::Stroke::new(1.0, Color32::from_rgb(115, 149, 190));
-    let points = if openness > 0.5 {
-        [
-            egui::pos2(x, y - 2.0),
-            egui::pos2(x + 2.0, y + 1.0),
-            egui::pos2(x + 4.0, y - 2.0),
-        ]
-    } else {
-        [
-            egui::pos2(x + 1.0, y - 3.0),
-            egui::pos2(x + 3.0, y),
-            egui::pos2(x + 1.0, y + 3.0),
-        ]
-    };
-    painter.line_segment([points[0], points[1]], stroke);
-    painter.line_segment([points[1], points[2]], stroke);
-    painter.rect_stroke(
-        egui::Rect::from_min_size(egui::pos2(x + 7.0, y - 3.0), egui::vec2(10.0, 8.0)),
-        1.0,
-        stroke,
-        egui::StrokeKind::Inside,
-    );
-    painter.line_segment(
-        [egui::pos2(x + 8.0, y - 3.0), egui::pos2(x + 8.0, y - 5.0)],
-        stroke,
-    );
-    painter.line_segment(
-        [egui::pos2(x + 8.0, y - 5.0), egui::pos2(x + 12.0, y - 5.0)],
-        stroke,
-    );
 }
 
 fn session_row(ui: &mut egui::Ui, name: &str, selected: bool, zoom: f32) -> egui::Response {
@@ -1025,20 +945,47 @@ impl App {
 
     fn session_confirmations(&mut self, ctx: &egui::Context) {
         if self.confirm_exit_open {
-            egui::Modal::new(egui::Id::unique("confirm_exit")).show(ctx, |ui| {
-                ui.heading("退出 RShell？");
-                ui.label("正在运行的会话将断开连接。");
-                ui.horizontal(|ui| {
-                    if ui.button("取消").clicked() {
-                        self.confirm_exit_open = false;
-                    }
-                    if ui.button("断开并退出").clicked() {
-                        self.confirm_exit_open = false;
-                        self.exit_approved = true;
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
+            egui::Modal::new(egui::Id::unique("confirm_exit"))
+                .frame(
+                    egui::Frame::window(&ctx.style_of(if self.config.light_theme {
+                        egui::Theme::Light
+                    } else {
+                        egui::Theme::Dark
+                    }))
+                    .inner_margin(24.0)
+                    .corner_radius(12),
+                )
+                .show(ctx, |ui| {
+                    ui.set_width(320.0);
+                    ui.label(RichText::new("退出 RShell？").size(18.0).strong());
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new("正在运行的会话将断开连接。")
+                            .size(14.0)
+                            .weak(),
+                    );
+                    ui.add_space(24.0);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 10.0;
+                        if ui
+                            .add_sized(
+                                [116.0, 36.0],
+                                egui::Button::new("断开并退出").selected(true),
+                            )
+                            .clicked()
+                        {
+                            self.confirm_exit_open = false;
+                            self.exit_approved = true;
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                        if ui
+                            .add_sized([80.0, 36.0], egui::Button::new("取消"))
+                            .clicked()
+                        {
+                            self.confirm_exit_open = false;
+                        }
+                    });
                 });
-            });
         }
         if let Some((target, mode)) = self.pending_close {
             egui::Modal::new(egui::Id::unique("confirm_close_tabs")).show(ctx, |ui| {
@@ -1145,6 +1092,9 @@ impl App {
         smoke: bool,
     ) -> anyhow::Result<Self> {
         egui_extras::install_image_loaders(&cc.egui_ctx);
+        if smoke && std::env::args().any(|a| a == "--smoke-session-tree") {
+            session_tree::smoke_fixture(&mut config);
+        }
         if smoke && std::env::args().any(|a| a == "--smoke-light") {
             config.light_theme = true;
         }
@@ -1291,6 +1241,15 @@ impl App {
                 tab.show_search = true;
                 tab.search = "Rust".into();
             }
+            cc.egui_ctx
+                .send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(800.0, 520.0)));
+        }
+        if smoke && std::env::args().any(|a| a == "--smoke-tree-narrow") {
+            cc.egui_ctx
+                .send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(800.0, 520.0)));
+        }
+        if smoke && std::env::args().any(|a| a == "--smoke-confirm-exit") {
+            app.confirm_exit_open = true;
             cc.egui_ctx
                 .send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(800.0, 520.0)));
         }
@@ -2109,192 +2068,200 @@ impl App {
 
     fn folder_tree(&mut self, ui: &mut egui::Ui, parent: Option<Uuid>) {
         let filter = self.filter.to_lowercase();
-        let mut folders: Vec<_> = self
-            .config
-            .folders
-            .iter()
-            .filter(|f| f.parent_id == parent)
-            .cloned()
-            .collect();
-        folders.sort_by(|a, b| a.name.cmp(&b.name));
-        for folder in folders {
-            if !folder_matches(&self.config, folder.id, &filter) {
-                continue;
-            }
-            let header = egui::CollapsingHeader::new(
-                RichText::new(&folder.name).size(15.0 * self.sessions_zoom),
-            )
-            .icon(folder_icon)
-            .id_salt((folder.id, !filter.is_empty()))
-            .default_open(true)
-            .open(if filter.is_empty() { None } else { Some(true) })
-            .show(ui, |ui| self.folder_tree(ui, Some(folder.id)));
-            let handle = egui::Rect::from_min_max(
-                egui::pos2(
-                    header.header_response.rect.right() - 24.0 * self.sessions_zoom,
-                    header.header_response.rect.top(),
-                ),
-                header.header_response.rect.right_bottom(),
-            );
-            let drag = ui.interact(
-                handle,
-                ui.scope_id().with(("folder_drag", folder.id)),
-                egui::Sense::drag(),
-            );
-            ui.painter().text(
-                handle.center(),
-                egui::Align2::CENTER_CENTER,
-                "⋮⋮",
-                egui::FontId::proportional(13.0 * self.sessions_zoom),
-                ui.visuals().weak_text_color(),
-            );
-            drag.on_hover_text("拖动文件夹到其他文件夹或所有会话")
-                .dnd_set_drag_payload(SessionDrag::Folder(folder.id));
-            if let Some(action) =
-                folder_drop(ui, &header.header_response, &self.config, Some(folder.id))
-            {
-                self.submit(action, Pending::Update);
-            }
-            header.header_response.context_menu(|ui| {
-                if ui.button("新建会话").clicked() {
-                    self.open_profile_editor(
-                        Profile {
-                            folder_id: Some(folder.id),
-                            ..self.new_profile()
-                        },
-                        false,
-                        None,
-                    );
-                    ui.close();
+        for item in self.config.session_children(parent) {
+            ui.push_id(item, |ui| match item {
+                SessionDrag::Folder(id) => {
+                    if folder_matches(&self.config, id, &filter) {
+                        let folder = self
+                            .config
+                            .folders
+                            .iter()
+                            .find(|f| f.id == id)
+                            .unwrap()
+                            .clone();
+                        self.folder_branch(ui, folder);
+                    }
                 }
-                if ui.button("新建子文件夹").clicked() {
-                    self.folder_editor = Some(Folder {
-                        id: Uuid::new_v4(),
-                        name: String::new(),
-                        parent_id: Some(folder.id),
-                    });
-                    ui.close();
-                }
-                if ui.button("重命名 / 移动文件夹").clicked() {
-                    self.folder_editor = Some(folder.clone());
-                    ui.close();
-                }
-                let empty = !self
-                    .config
-                    .folders
-                    .iter()
-                    .any(|f| f.parent_id == Some(folder.id))
-                    && !self
+                SessionDrag::Profile(id) => {
+                    let profile = self
                         .config
                         .profiles
                         .iter()
-                        .any(|p| p.folder_id == Some(folder.id));
-                if ui
-                    .add_enabled(empty, egui::Button::new("删除空文件夹"))
-                    .on_disabled_hover_text("请先移动会话和子文件夹")
-                    .clicked()
-                {
-                    self.submit(Action::DeleteFolder(folder.id), Pending::Update);
-                    ui.close();
+                        .find(|p| p.id == id)
+                        .unwrap()
+                        .clone();
+                    if profile_matches(&self.config, &profile, &filter) {
+                        self.profile_branch(ui, profile);
+                    }
                 }
             });
         }
-        let mut profiles: Vec<_> = self
-            .config
-            .profiles
-            .iter()
-            .filter(|p| p.folder_id == parent && profile_matches(&self.config, p, &filter))
-            .cloned()
-            .collect();
-        profiles.sort_by(|a, b| a.name.cmp(&b.name));
-        for profile in profiles {
-            let selected = self
-                .tabs
-                .get(self.active)
-                .is_some_and(|tab| tab.profile.id == profile.id);
-            let response = session_row(ui, &profile.name, selected, self.sessions_zoom)
-                .on_hover_text(format!(
-                    "{} · {}",
-                    profile.endpoint(),
-                    self.config.folder_path(profile.folder_id)
-                ));
-            response.dnd_set_drag_payload(SessionDrag::Profile(profile.id));
-            if response.clicked() {
-                self.open_profile(profile.clone());
+    }
+
+    fn folder_branch(&mut self, ui: &mut egui::Ui, folder: Folder) {
+        let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
+            ui.ctx(),
+            ui.make_persistent_id((folder.id, !self.filter.is_empty())),
+            true,
+        );
+        if !self.filter.is_empty() {
+            state.set_open(true);
+        }
+        let response =
+            session_tree::folder_row(ui, &folder.name, state.is_open(), self.sessions_zoom);
+        response.dnd_set_drag_payload(SessionDrag::Folder(folder.id));
+        if response.clicked() {
+            state.toggle(ui);
+        }
+        if let Some(action) = session_tree::drop_target(
+            ui,
+            &response,
+            &self.config,
+            Some(SessionDrag::Folder(folder.id)),
+        ) {
+            self.submit(action, Pending::Update);
+        }
+        response.context_menu(|ui| {
+            if ui.button("新建会话").clicked() {
+                self.open_profile_editor(
+                    Profile {
+                        folder_id: Some(folder.id),
+                        ..self.new_profile()
+                    },
+                    false,
+                    None,
+                );
+                ui.close();
             }
-            response.context_menu(|ui| {
-                let pinned = self.config.shortcut_profiles.contains(&profile.id);
-                if ui
-                    .button(if pinned {
-                        "从快捷栏移除"
-                    } else {
-                        "添加到快捷栏"
-                    })
-                    .clicked()
-                {
+            if ui.button("新建子文件夹").clicked() {
+                self.folder_editor = Some(Folder {
+                    id: Uuid::new_v4(),
+                    name: String::new(),
+                    parent_id: Some(folder.id),
+                });
+                ui.close();
+            }
+            if ui.button("重命名 / 移动文件夹").clicked() {
+                self.folder_editor = Some(folder.clone());
+                ui.close();
+            }
+            let empty = !self
+                .config
+                .folders
+                .iter()
+                .any(|f| f.parent_id == Some(folder.id))
+                && !self
+                    .config
+                    .profiles
+                    .iter()
+                    .any(|p| p.folder_id == Some(folder.id));
+            if ui
+                .add_enabled(empty, egui::Button::new("删除空文件夹"))
+                .on_disabled_hover_text("请先移动会话和子文件夹")
+                .clicked()
+            {
+                self.submit(Action::DeleteFolder(folder.id), Pending::Update);
+                ui.close();
+            }
+        });
+        state.show_body_indented(&response, ui, |ui| self.folder_tree(ui, Some(folder.id)));
+    }
+
+    fn profile_branch(&mut self, ui: &mut egui::Ui, profile: Profile) {
+        let selected = self
+            .tabs
+            .get(self.active)
+            .is_some_and(|tab| tab.profile.id == profile.id);
+        let response =
+            session_row(ui, &profile.name, selected, self.sessions_zoom).on_hover_text(format!(
+                "{} · {}",
+                profile.endpoint(),
+                self.config.folder_path(profile.folder_id)
+            ));
+        response.dnd_set_drag_payload(SessionDrag::Profile(profile.id));
+        if let Some(action) = session_tree::drop_target(
+            ui,
+            &response,
+            &self.config,
+            Some(SessionDrag::Profile(profile.id)),
+        ) {
+            self.submit(action, Pending::Update);
+        }
+        if response.clicked() {
+            self.open_profile(profile.clone());
+        }
+        response.context_menu(|ui| {
+            let pinned = self.config.shortcut_profiles.contains(&profile.id);
+            if ui
+                .button(if pinned {
+                    "从快捷栏移除"
+                } else {
+                    "添加到快捷栏"
+                })
+                .clicked()
+            {
+                self.submit(
+                    Action::SetShortcut {
+                        id: profile.id,
+                        enabled: !pinned,
+                    },
+                    Pending::Update,
+                );
+                ui.close();
+            }
+            if ui.button("编辑会话").clicked() {
+                self.open_profile_editor(profile.clone(), false, None);
+                ui.close();
+            }
+            if ui.button("复制会话").clicked() {
+                let mut copy = profile.clone();
+                copy.id = Uuid::new_v4();
+                copy.name.push_str(" 副本");
+                copy.remember_secret = false;
+                self.open_profile_editor(copy, false, None);
+                ui.close();
+            }
+            if ui.button("导出全部会话 (.rsh)…").clicked() {
+                self.choose_session_file(ui.ctx(), Some(false));
+                ui.close();
+            }
+            if ui
+                .add_enabled(
+                    self.config
+                        .profiles
+                        .iter()
+                        .any(|p| p.protocol != Protocol::Serial),
+                    egui::Button::new("导出全部给 Xshell (.xts)…"),
+                )
+                .clicked()
+            {
+                self.choose_session_file(ui.ctx(), Some(true));
+                ui.close();
+            }
+            ui.menu_button("移动到文件夹", |ui| {
+                let mut destination = profile.folder_id;
+                folder_picker(
+                    ui,
+                    &self.config,
+                    &mut destination,
+                    ("move_profile", profile.id),
+                );
+                if destination != profile.folder_id {
                     self.submit(
-                        Action::SetShortcut {
+                        Action::MoveProfile {
                             id: profile.id,
-                            enabled: !pinned,
+                            folder_id: destination,
                         },
                         Pending::Update,
                     );
                     ui.close();
                 }
-                if ui.button("编辑会话").clicked() {
-                    self.open_profile_editor(profile.clone(), false, None);
-                    ui.close();
-                }
-                if ui.button("复制会话").clicked() {
-                    let mut copy = profile.clone();
-                    copy.id = Uuid::new_v4();
-                    copy.name.push_str(" 副本");
-                    copy.remember_secret = false;
-                    self.open_profile_editor(copy, false, None);
-                    ui.close();
-                }
-                if ui.button("导出全部会话 (.rsh)…").clicked() {
-                    self.choose_session_file(ui.ctx(), Some(false));
-                    ui.close();
-                }
-                if ui
-                    .add_enabled(
-                        self.config
-                            .profiles
-                            .iter()
-                            .any(|p| p.protocol != Protocol::Serial),
-                        egui::Button::new("导出全部给 Xshell (.xts)…"),
-                    )
-                    .clicked()
-                {
-                    self.choose_session_file(ui.ctx(), Some(true));
-                    ui.close();
-                }
-                ui.menu_button("移动到文件夹", |ui| {
-                    let mut destination = profile.folder_id;
-                    folder_picker(
-                        ui,
-                        &self.config,
-                        &mut destination,
-                        ("move_profile", profile.id),
-                    );
-                    if destination != profile.folder_id {
-                        self.submit(
-                            Action::MoveProfile {
-                                id: profile.id,
-                                folder_id: destination,
-                            },
-                            Pending::Update,
-                        );
-                        ui.close();
-                    }
-                });
-                if ui.button("删除会话配置").clicked() {
-                    self.delete = Some(profile.id);
-                    ui.close();
-                }
             });
-        }
+            if ui.button("删除会话配置").clicked() {
+                self.delete = Some(profile.id);
+                ui.close();
+            }
+        });
     }
 
     fn folder_dialog(&mut self, ctx: &egui::Context) {
@@ -3410,7 +3377,10 @@ impl eframe::App for App {
                     )),
                 )
                 .default_size(
-                    if self.smoke && std::env::args().any(|a| a == "--smoke-tunnel-status") {
+                    if self.smoke
+                        && std::env::args()
+                            .any(|a| a == "--smoke-tunnel-status" || a == "--smoke-tree-narrow")
+                    {
                         180.0
                     } else {
                         280.0
@@ -3512,6 +3482,7 @@ impl eframe::App for App {
                     ui.visuals_mut().widgets.hovered.bg_stroke = egui::Stroke::NONE;
                     ui.visuals_mut().widgets.active.bg_stroke = egui::Stroke::NONE;
                     egui::ScrollArea::vertical().show(ui, |ui| {
+                        session_tree::auto_scroll(ui);
                         let root = egui::CollapsingHeader::new("所有会话")
                             .id_salt(("all_sessions", !self.filter.is_empty()))
                             .default_open(true)
@@ -3523,7 +3494,7 @@ impl eframe::App for App {
                             .show(ui, |ui| self.folder_tree(ui, None));
                         self.jumpserver_tree(ui);
                         if let Some(action) =
-                            folder_drop(ui, &root.header_response, &self.config, None)
+                            session_tree::drop_target(ui, &root.header_response, &self.config, None)
                         {
                             self.submit(action, Pending::Update);
                         }
@@ -3951,42 +3922,6 @@ mod tests {
         assert_eq!(adjacent_tab(3, 4, 1), 0);
         assert_eq!(adjacent_tab(1, 4, 1), 2);
         assert_eq!(adjacent_tab(0, 0, 1), 0);
-    }
-
-    #[test]
-    fn drag_targets_reject_cycles_and_no_op_moves() {
-        let parent = Folder {
-            id: Uuid::new_v4(),
-            name: "生产".into(),
-            parent_id: None,
-        };
-        let child = Folder {
-            id: Uuid::new_v4(),
-            name: "数据库".into(),
-            parent_id: Some(parent.id),
-        };
-        let profile = Profile {
-            folder_id: Some(child.id),
-            ..Default::default()
-        };
-        let config = Config {
-            folders: vec![parent.clone(), child.clone()],
-            profiles: vec![profile.clone()],
-            ..Default::default()
-        };
-        assert!(move_action(&config, SessionDrag::Folder(parent.id), Some(child.id)).is_none());
-        assert!(move_action(&config, SessionDrag::Folder(child.id), Some(child.id)).is_none());
-        assert!(move_action(&config, SessionDrag::Profile(profile.id), Some(child.id)).is_none());
-        assert!(
-            matches!(move_action(&config, SessionDrag::Folder(child.id), None), Some(Action::SaveFolder(folder)) if folder.parent_id.is_none())
-        );
-        assert!(matches!(
-            move_action(&config, SessionDrag::Profile(profile.id), None),
-            Some(Action::MoveProfile {
-                folder_id: None,
-                ..
-            })
-        ));
     }
 
     #[test]

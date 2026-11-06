@@ -28,6 +28,85 @@ mod shortcut_tests {
     use super::*;
 
     #[test]
+    fn cli_setting_defaults_off_and_clicks_persist_in_both_themes() {
+        let root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/cli-settings-tests");
+        std::fs::create_dir_all(&root).unwrap();
+        for light_theme in [false, true] {
+            let temp = tempfile::tempdir_in(&root).unwrap();
+            let ctx = egui::Context::default();
+            let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .unwrap();
+            let mut app = App::new(
+                &cc,
+                Config {
+                    light_theme,
+                    ..Default::default()
+                },
+                temp.path().join("config.json"),
+                runtime,
+                true,
+                false,
+            )
+            .unwrap();
+            assert!(!app.config.cli_enabled);
+            let frame = |app: &mut App, events| {
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(500.0, 640.0),
+                        )),
+                        events,
+                        focused: true,
+                        ..Default::default()
+                    },
+                    |ui| {
+                        app.draw_session_settings(ui);
+                    },
+                );
+                output.textures_delta.clear();
+                output
+            };
+            for enabled in [true, false] {
+                let output = frame(&mut app, vec![]);
+                let pos = output
+                    .shapes
+                    .iter()
+                    .find_map(|s| crate::composer_icons::find_text(&s.shape, "启用命令行（CLI）"))
+                    .unwrap()
+                    .visual_bounding_rect()
+                    .center();
+                for pressed in [true, false] {
+                    frame(
+                        &mut app,
+                        vec![
+                            egui::Event::PointerMoved(pos),
+                            egui::Event::PointerButton {
+                                pos,
+                                button: egui::PointerButton::Primary,
+                                pressed,
+                                modifiers: egui::Modifiers::NONE,
+                            },
+                        ],
+                    );
+                }
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while app.config.cli_enabled != enabled {
+                    app.poll_store(&ctx);
+                    assert!(Instant::now() < deadline, "{}", app.message);
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                assert_eq!(Config::load(&app.path).unwrap().cli_enabled, enabled);
+            }
+        }
+    }
+
+    #[test]
     fn captures_consumed_key_persists_and_triggers_terminal_search() {
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/shortcut-tests");
@@ -465,6 +544,16 @@ impl App {
     fn draw_session_settings(&mut self, ui: &mut egui::Ui) {
         ui.heading("会话");
         ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            let mut enabled = self.config.cli_enabled;
+            if ui.checkbox(&mut enabled, "启用命令行（CLI）").changed() {
+                self.submit(Action::CliEnabled(enabled), Pending::Update);
+            }
+            ui.add(crate::composer_icons::image(crate::composer_icons::Icon::Help, ui.visuals().weak_text_color()))
+                .on_hover_text("默认关闭，旧配置也保持关闭。开启后可从 rshell-cli 执行远端命令和 SFTP 同步，并读取已保存的会话凭据。关闭仅阻止新调用，不中止已运行的任务。此开关不是同一 Windows 用户下的安全隔离边界。");
+        });
+        ui.weak("启用后可使用已保存的会话凭据；不开放网络监听端口。");
+        ui.separator();
         ui.add_enabled_ui(false, |ui| {
             let mut enabled = true;
             ui.checkbox(&mut enabled, "在单一 RShell 窗口中打开多个会话");

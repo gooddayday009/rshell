@@ -200,6 +200,47 @@ async fn execute(
         }
     }
 }
+
+pub(crate) async fn headless(
+    session: std::sync::Arc<crate::ssh::SharedSession>,
+    request: Request,
+) -> Result<Outcome> {
+    let mut channel = session.0.channel_open_session().await?;
+    channel.request_subsystem(true, "sftp").await?;
+    loop {
+        match channel.wait().await {
+            Some(russh::ChannelMsg::Success) => break,
+            Some(russh::ChannelMsg::WindowAdjusted { .. }) => {}
+            _ => bail!("服务器拒绝 SFTP 子系统或连接已关闭"),
+        }
+    }
+    if let Request::List(path) = request {
+        let raw = russh_sftp::client::RawSftpSession::new(channel.into_stream());
+        raw.init().await?;
+        return list(&raw, path).await;
+    }
+    let sftp = SftpSession::new(channel.into_stream()).await?;
+    // This entry point transfers single regular files. The GUI owns recursive/resume jobs.
+    match &request {
+        Request::Upload { local, .. } => {
+            let meta = tokio::fs::symlink_metadata(local).await?;
+            if !meta.is_file() || meta.file_type().is_symlink() {
+                bail!("CLI 上传仅支持普通文件");
+            }
+        }
+        Request::Download { remote, .. } => {
+            let meta = sftp.symlink_metadata(remote.clone()).await?;
+            if !meta.is_regular() || meta.is_symlink() {
+                bail!("CLI 下载仅支持普通文件");
+            }
+        }
+        Request::List(_) => unreachable!(),
+    }
+    let (progress, _) = watch::channel(0);
+    let result = execute(&sftp, request, &progress).await;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), sftp.close()).await;
+    result
+}
 pub(crate) fn partial_path(target: &Path) -> Result<PathBuf> {
     let parent = target.parent().context("未选择目标目录")?;
     Ok(parent.join(format!(".rshell-{}.part", uuid::Uuid::new_v4())))

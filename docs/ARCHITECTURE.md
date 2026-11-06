@@ -5,6 +5,9 @@
 | 文件 | 职责 |
 | --- | --- |
 | `crates/rshell-app/src/main.rs` | 配置目录、单实例锁、Tokio runtime、原生窗口、字体回退和启动错误 |
+| `crates/rshell-app/src/cli/` | 独立控制台入口、参数/认证输入、配置选择、输出与退出码；不创建 GUI |
+| `crates/rshell-core/src/headless.rs` | 复用 SSH 认证与主机信任的非交互 exec/SFTP；不创建 PTY 或隧道 |
+| `crates/rshell-core/src/sftp_sync.rs` | 目录内容清单、SHA-256 比较、同步预览、临时文件校验发布和显式镜像删除；路径、层级与条目数边界 |
 | `crates/rshell-app/src/app.rs` | 会话编辑、标签、首次主机密钥自动记录、偏好、最近连接、连接事件接收 |
 | `crates/rshell-app/src/terminal_view.rs` | 可见网格绘制、选区、光标、IME、键鼠输入、粘贴确认和查找 UI |
 | `crates/rshell-core/src/ssh.rs` | SSH 握手、认证、PTY/shell、保活、取消、有界输入队列和协议事件 |
