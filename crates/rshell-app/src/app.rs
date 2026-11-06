@@ -377,6 +377,8 @@ pub struct Tab {
     pub render_snapshot: Option<Arc<rshell_terminal::Snapshot>>,
     pub connection: Option<ssh::Connection>,
     pub status: String,
+    pub tunnel_statuses: Vec<String>,
+    pub owns_tunnels: bool,
     pub connected: bool,
     pub finished: bool,
     pub size: (u16, u16),
@@ -388,6 +390,7 @@ pub struct Tab {
     pub focus: bool,
     pub pointer_in_terminal: bool,
     pub pending_bottom: bool,
+    pub scroll_remainder: f32,
     host_prompt: Option<HostPrompt>,
     transfer: transfer_view::Browser,
     #[cfg(test)]
@@ -395,6 +398,11 @@ pub struct Tab {
 }
 
 impl Tab {
+    fn command_ready(&self) -> bool {
+        self.connected
+            && !self.profile.tunnel_only
+            && (self.local || self.profile.protocol == Protocol::Ssh)
+    }
     fn execution_identity(&self) -> String {
         if self.local {
             format!(
@@ -425,7 +433,7 @@ impl Tab {
         }
     }
     pub fn send(&mut self, cmd: ssh::Command) {
-        if !self.connected {
+        if !self.connected || self.profile.tunnel_only {
             return;
         }
         #[cfg(test)]
@@ -472,6 +480,7 @@ impl ssh::Terminal for TerminalAdapter {
 }
 
 struct Editor {
+    tunnel_settings: bool,
     show_secret: bool,
     focus_secret: bool,
     picker: Option<std::sync::mpsc::Receiver<Option<PathBuf>>>,
@@ -489,6 +498,7 @@ struct Editor {
 impl Editor {
     fn new(profile: Profile) -> Self {
         Self {
+            tunnel_settings: false,
             serial_ports: vec![],
             port_scan: None,
             port_error: String::new(),
@@ -1135,6 +1145,9 @@ impl App {
         smoke: bool,
     ) -> anyhow::Result<Self> {
         egui_extras::install_image_loaders(&cc.egui_ctx);
+        if smoke && std::env::args().any(|a| a == "--smoke-light") {
+            config.light_theme = true;
+        }
         if smoke && std::env::args().any(|a| a == "--smoke-ai-font-large") {
             config.ai.chat_font_size = 24.0;
         }
@@ -1316,7 +1329,7 @@ impl App {
             && std::env::args().any(|a| a == "--smoke-sftp")
             && let Some(tab) = app.tabs.first_mut()
         {
-            tab.transfer.open = true;
+            tab.transfer.smoke_fixture();
         }
         if smoke && std::env::args().any(|a| a == "--smoke-serial") {
             app.editor = Some(Editor::new(Profile {
@@ -1326,6 +1339,28 @@ impl App {
         }
         if smoke && std::env::args().any(|a| a == "--smoke-session") {
             app.editor = Some(Editor::new(app.new_profile()));
+        }
+        if smoke && std::env::args().any(|a| a == "--smoke-tunnels") {
+            let mut editor = Editor::new(app.new_profile());
+            editor.tunnel_settings = true;
+            editor.profile.tunnel_only = true;
+            editor.profile.tunnels = vec![
+                rshell_core::tunnel::Rule::default(),
+                rshell_core::tunnel::Rule {
+                    kind: rshell_core::tunnel::Kind::Dynamic,
+                    bind_port: 1080,
+                    ..Default::default()
+                },
+            ];
+            app.editor = Some(editor);
+        }
+        if smoke && std::env::args().any(|a| a == "--smoke-tunnel-status") {
+            let tab = &mut app.tabs[0];
+            tab.profile.tunnel_only = true;
+            tab.profile.tunnels = vec![rshell_core::tunnel::Rule::default()];
+            tab.tunnel_statuses = vec!["演示状态：监听中（未建立真实隧道）".into()];
+            cc.egui_ctx
+                .send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(800.0, 520.0)));
         }
         if smoke && std::env::args().any(|a| a == "--smoke-telnet") {
             app.editor = Some(Editor::new(Profile {
@@ -1400,6 +1435,13 @@ impl App {
 
     fn chrome_action(&mut self, action: u8, ctx: &egui::Context) {
         match action {
+            16 => {
+                let mut profile = self.new_profile();
+                profile.name = "SSH 隧道".into();
+                profile.tunnel_only = true;
+                profile.tunnels.push(rshell_core::tunnel::Rule::default());
+                self.open_profile_editor(profile, false, None);
+            }
             15 => self.jumpserver.open = true,
             14 => self.choose_session_file(ctx, None),
             13 => self.import_open = true,
@@ -1488,13 +1530,19 @@ impl App {
                     self.reconnect_jumpserver(ctx, reference);
                     return;
                 }
-                if tab.local || tab.profile.protocol != Protocol::Ssh || !tab.connected {
+                if tab.local
+                    || tab.profile.protocol != Protocol::Ssh
+                    || !tab.connected
+                    || tab.profile.tunnel_only
+                {
                     return;
                 }
                 let Some(source) = &tab.connection else {
                     return;
                 };
                 let mut new = self.configured_tab(tab.profile.clone());
+                // A duplicate shell channel does not own or start the original tab's listeners.
+                new.owns_tunnels = false;
                 let adapter = TerminalAdapter {
                     terminal: new.terminal.clone(),
                     ctx: ctx.clone(),
@@ -1588,6 +1636,8 @@ impl App {
             render_snapshot: None,
             connection: None,
             status: "未连接".into(),
+            tunnel_statuses: Vec::new(),
+            owns_tunnels: true,
             connected: false,
             finished: false,
             size: (80, 24),
@@ -1599,6 +1649,7 @@ impl App {
             focus: true,
             pointer_in_terminal: false,
             pending_bottom: false,
+            scroll_remainder: 0.0,
             host_prompt: None,
             transfer: transfer_view::Browser::default(),
             #[cfg(test)]
@@ -1976,6 +2027,7 @@ impl App {
                             });
                         }
                         ssh::Event::Status(status) => tab.status = status,
+                        ssh::Event::Tunnels(statuses) => tab.tunnel_statuses = statuses,
                         ssh::Event::Connected => {
                             tab.connected = true;
                             tab.status = if let Some(reference) = &tab.jumpserver {
@@ -1990,6 +2042,8 @@ impl App {
                                 "本地 Windows PowerShell · 初始提示符已就绪".into()
                             } else if tab.profile.protocol == Protocol::Telnet {
                                 "已连接 · Telnet 明文".into()
+                            } else if tab.profile.tunnel_only {
+                                "已连接 · 仅隧道".into()
                             } else {
                                 "已连接".into()
                             };
@@ -2385,6 +2439,11 @@ impl App {
                             if ui.selectable_value(&mut editor.profile.protocol, Protocol::Ssh, "SSH").changed()
                                 && editor.profile.port == 23 { editor.profile.port = 22; }
                             ui.add_space(8.0);
+                            if editor.profile.protocol == Protocol::Ssh {
+                                ui.selectable_value(&mut editor.tunnel_settings, false, "登录设置");
+                                ui.selectable_value(&mut editor.tunnel_settings, true, "SSH 隧道");
+                                ui.add_space(8.0);
+                            }
                             if ui.selectable_value(&mut editor.profile.protocol, Protocol::Telnet, "Telnet（明文）").changed()
                                 && editor.profile.port == 22 { editor.profile.port = 23; }
                             ui.add_space(8.0);
@@ -2408,6 +2467,10 @@ impl App {
                             .id_salt("session_fields")
                             .max_height(540.0)
                             .show(ui, |ui| {
+                                if editor.tunnel_settings && editor.profile.protocol == Protocol::Ssh {
+                                    crate::tunnel_view::settings(ui, &mut editor.profile);
+                                    return;
+                                }
                                 ui.label(RichText::new("连接设置").size(22.0).strong());
                                 ui.label(
                                     RichText::new("选择 SSH、Telnet 或串口，连接后将在新标签打开。").weak(),
@@ -2738,7 +2801,51 @@ impl App {
     }
 }
 
+// Native clipboard interception is disabled so terminal Ctrl+V reaches Vim,
+// including when the clipboard is empty. Restore standard shortcuts in text fields.
+fn text_edit_clipboard_shortcuts(ctx: &egui::Context, input: &mut egui::RawInput) {
+    let text_focus = ctx
+        .memory(|memory| memory.focused())
+        .is_some_and(|id| egui::text_edit::TextEditState::load(ctx, id).is_some());
+    if !text_focus {
+        return;
+    }
+    input.events.retain_mut(|event| {
+        if let egui::Event::Key {
+            key,
+            pressed: true,
+            modifiers,
+            ..
+        } = event
+        {
+            let ctrl_only = modifiers.ctrl && !modifiers.alt && !modifiers.shift;
+            let shift_only = modifiers.shift && !modifiers.alt && !modifiers.ctrl;
+            if *key == egui::Key::Copy
+                || (ctrl_only && matches!(key, egui::Key::C | egui::Key::Insert))
+            {
+                *event = egui::Event::Copy;
+            } else if *key == egui::Key::Cut
+                || (ctrl_only && *key == egui::Key::X)
+                || (shift_only && *key == egui::Key::Delete)
+            {
+                *event = egui::Event::Cut;
+            } else if *key == egui::Key::Paste
+                || (ctrl_only && *key == egui::Key::V)
+                || (shift_only && *key == egui::Key::Insert)
+            {
+                ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+                return false;
+            }
+        }
+        true
+    });
+}
+
 impl eframe::App for App {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
+        text_edit_clipboard_shortcuts(ctx, input);
+    }
+
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_session_file_picker();
         self.poll_store(ctx);
@@ -2815,8 +2922,7 @@ impl eframe::App for App {
         } else if self.active >= self.tabs.len() {
             self.active = 0;
         }
-        let mut allow_terminal_input = !self.tabs.iter().any(|t| t.transfer.open)
-            && !self.updates.open
+        let mut allow_terminal_input = !self.updates.open
             && !self.about_open
             && !self.jumpserver.modal_open()
             && !self.import_open
@@ -2876,6 +2982,7 @@ impl eframe::App for App {
                                 "文件(F)",
                                 vec![
                                     ("新建 SSH / Telnet / 串口会话…", 0),
+                                    ("新建 SSH 隧道连接…", 16),
                                     ("本地 PowerShell", 1),
                                     ("关闭当前标签", 8),
                                 ],
@@ -3302,7 +3409,13 @@ impl eframe::App for App {
                             .sidebar,
                     )),
                 )
-                .default_size(280.0)
+                .default_size(
+                    if self.smoke && std::env::args().any(|a| a == "--smoke-tunnel-status") {
+                        180.0
+                    } else {
+                        280.0
+                    },
+                )
                 .min_size((180.0 * self.sessions_zoom).max(180.0))
                 .show(ui, |ui| {
                     if !self.settings
@@ -3520,156 +3633,173 @@ impl eframe::App for App {
                                             } else {
                                                 ui.visuals().extreme_bg_color
                                             };
-                                            let frame =
-                                                egui::Frame::NONE
-                                                    .fill(fill)
-                                                    .stroke(egui::Stroke::new(
-                                                        1.0,
-                                                        ui.visuals()
-                                                            .widgets
-                                                            .noninteractive
-                                                            .bg_stroke
-                                                            .color,
-                                                    ))
-                                                    .inner_margin(egui::Margin::symmetric(3, 1))
-                                                    .show(ui, |ui| {
-                                                        ui.horizontal(|ui| {
-                                                            ui.spacing_mut().item_spacing.x = 1.0;
-                                                            ui.spacing_mut().button_padding =
-                                                                egui::vec2(1.0, 0.0);
-                                                            ui.colored_label(
-                                                                if tab.connected {
-                                                                    Color32::from_rgb(0, 190, 40)
-                                                                } else if tab.finished {
-                                                                    Color32::from_rgb(245, 65, 70)
-                                                                } else {
-                                                                    Color32::GRAY
-                                                                },
-                                                                RichText::new("●").size(11.0),
-                                                            );
-                                                            let text = RichText::new(format!(
-                                                                "{} {}",
-                                                                index + 1,
-                                                                tab.title
-                                                            ))
-                                                            .size(12.0)
-                                                            .color(if selected {
-                                                                ui.visuals().selection.stroke.color
+                                            let frame = egui::Frame::NONE
+                                                .fill(fill)
+                                                .stroke(egui::Stroke::new(
+                                                    1.0,
+                                                    ui.visuals()
+                                                        .widgets
+                                                        .noninteractive
+                                                        .bg_stroke
+                                                        .color,
+                                                ))
+                                                .inner_margin(egui::Margin::symmetric(3, 1))
+                                                .show(ui, |ui| {
+                                                    ui.horizontal(|ui| {
+                                                        ui.spacing_mut().item_spacing.x = 1.0;
+                                                        ui.spacing_mut().button_padding =
+                                                            egui::vec2(1.0, 0.0);
+                                                        ui.colored_label(
+                                                            if tab.connected {
+                                                                Color32::from_rgb(0, 190, 40)
+                                                            } else if tab.finished {
+                                                                Color32::from_rgb(245, 65, 70)
                                                             } else {
-                                                                ui.visuals().text_color()
-                                                            });
-                                                            let response = ui
-                                                                .add_sized(
-                                                                    [tab_width - 36.0, 18.0],
-                                                                    egui::Button::new(text)
-                                                                        .frame(false)
-                                                                        .truncate(),
-                                                                )
-                                                                .on_hover_text(&tab.title);
-                                                            response.context_menu(|ui| {
-                                                        for (label, action, enabled) in [
-                                                            (
-                                                                "新选项卡(N)    Shift+Alt+N",
-                                                                TabAction::New,
-                                                                true,
-                                                            ),
-                                                            (
-                                                                "复制会话(D)",
-                                                                TabAction::Duplicate,
-                                                                true,
-                                                            ),
-                                                            (
-                                                                "复制 SSH 渠道(H)",
-                                                                TabAction::Channel,
-                                                                !tab.local
-                                                                    && tab.profile.protocol
-                                                                        == Protocol::Ssh
-                                                                    && tab.connected,
-                                                            ),
-                                                            ("清屏", TabAction::ClearScreen, true),
-                                                            (
-                                                                "关闭(C)    Ctrl+Shift+F4",
-                                                                TabAction::Close(
-                                                                    CloseTabs::Current,
+                                                                Color32::GRAY
+                                                            },
+                                                            RichText::new("●").size(11.0),
+                                                        );
+                                                        let text = RichText::new(format!(
+                                                            "{} {}",
+                                                            index + 1,
+                                                            tab.title
+                                                        ))
+                                                        .size(12.0)
+                                                        .color(if selected {
+                                                            ui.visuals().selection.stroke.color
+                                                        } else {
+                                                            ui.visuals().text_color()
+                                                        });
+                                                        let response = ui
+                                                            .add_sized(
+                                                                [tab_width - 36.0, 18.0],
+                                                                egui::Button::new(text)
+                                                                    .frame(false)
+                                                                    .truncate(),
+                                                            )
+                                                            .on_hover_text(&tab.title);
+                                                        response.context_menu(|ui| {
+                                                            for (label, action, enabled) in [
+                                                                (
+                                                                    "新选项卡(N)    Shift+Alt+N",
+                                                                    TabAction::New,
+                                                                    true,
                                                                 ),
-                                                                true,
-                                                            ),
-                                                            (
-                                                                "关闭右侧标签页(R)",
-                                                                TabAction::Close(CloseTabs::Right),
-                                                                index + 1 < tab_count,
-                                                            ),
-                                                            (
-                                                                "关闭所有本地标签(L)",
-                                                                TabAction::Close(CloseTabs::Local),
-                                                                has_local,
-                                                            ),
-                                                            (
-                                                                "关闭断开的连接",
-                                                                TabAction::Close(
-                                                                    CloseTabs::Disconnected,
+                                                                (
+                                                                    "复制会话(D)",
+                                                                    TabAction::Duplicate,
+                                                                    true,
                                                                 ),
-                                                                has_disconnected,
-                                                            ),
-                                                            (
-                                                                "关闭其他选项卡(O)",
-                                                                TabAction::Close(CloseTabs::Others),
-                                                                tab_count > 1,
-                                                            ),
-                                                            (
-                                                                "关闭所有选项卡(B)",
-                                                                TabAction::Close(CloseTabs::All),
-                                                                true,
-                                                            ),
-                                                            ("重命名(M)…", TabAction::Rename, true),
-                                                        ] {
-                                                            if ui
-                                                                .add_enabled(
-                                                                    enabled,
-                                                                    egui::Button::new(label),
-                                                                )
-                                                                .clicked()
-                                                            {
-                                                                tab_action = Some((index, action));
-                                                                ui.close();
-                                                            }
-                                                        }
-                                                    });
-                                                            if response.clicked() {
-                                                                self.active = index;
-                                                                tab.focus = true;
-                                                                response.scroll_to_me(None);
-                                                            }
-                                                            if ui
-                                                                .add_sized(
-                                                                    [18.0, 18.0],
-                                                                    egui::Button::new(
-                                                                        RichText::new("×")
-                                                                            .size(12.0)
-                                                                            .color(if selected {
-                                                                                ui.visuals()
-                                                                                    .selection
-                                                                                    .stroke
-                                                                                    .color
-                                                                            } else {
-                                                                                ui.visuals()
-                                                                                    .text_color()
-                                                                            }),
-                                                                    )
-                                                                    .frame(false),
-                                                                )
-                                                                .on_hover_text("关闭标签并断开连接")
-                                                                .clicked()
-                                                            {
-                                                                tab_action = Some((
-                                                                    index,
+                                                                (
+                                                                    "复制 SSH 渠道(H)",
+                                                                    TabAction::Channel,
+                                                                    !tab.local
+                                                                        && tab.profile.protocol
+                                                                            == Protocol::Ssh
+                                                                        && tab.connected
+                                                                        && !tab.profile.tunnel_only,
+                                                                ),
+                                                                (
+                                                                    "清屏",
+                                                                    TabAction::ClearScreen,
+                                                                    true,
+                                                                ),
+                                                                (
+                                                                    "关闭(C)    Ctrl+Shift+F4",
                                                                     TabAction::Close(
                                                                         CloseTabs::Current,
                                                                     ),
-                                                                ));
+                                                                    true,
+                                                                ),
+                                                                (
+                                                                    "关闭右侧标签页(R)",
+                                                                    TabAction::Close(
+                                                                        CloseTabs::Right,
+                                                                    ),
+                                                                    index + 1 < tab_count,
+                                                                ),
+                                                                (
+                                                                    "关闭所有本地标签(L)",
+                                                                    TabAction::Close(
+                                                                        CloseTabs::Local,
+                                                                    ),
+                                                                    has_local,
+                                                                ),
+                                                                (
+                                                                    "关闭断开的连接",
+                                                                    TabAction::Close(
+                                                                        CloseTabs::Disconnected,
+                                                                    ),
+                                                                    has_disconnected,
+                                                                ),
+                                                                (
+                                                                    "关闭其他选项卡(O)",
+                                                                    TabAction::Close(
+                                                                        CloseTabs::Others,
+                                                                    ),
+                                                                    tab_count > 1,
+                                                                ),
+                                                                (
+                                                                    "关闭所有选项卡(B)",
+                                                                    TabAction::Close(
+                                                                        CloseTabs::All,
+                                                                    ),
+                                                                    true,
+                                                                ),
+                                                                (
+                                                                    "重命名(M)…",
+                                                                    TabAction::Rename,
+                                                                    true,
+                                                                ),
+                                                            ] {
+                                                                if ui
+                                                                    .add_enabled(
+                                                                        enabled,
+                                                                        egui::Button::new(label),
+                                                                    )
+                                                                    .clicked()
+                                                                {
+                                                                    tab_action =
+                                                                        Some((index, action));
+                                                                    ui.close();
+                                                                }
                                                             }
                                                         });
+                                                        if response.clicked() {
+                                                            self.active = index;
+                                                            tab.focus = true;
+                                                            response.scroll_to_me(None);
+                                                        }
+                                                        if ui
+                                                            .add_sized(
+                                                                [18.0, 18.0],
+                                                                egui::Button::new(
+                                                                    RichText::new("×")
+                                                                        .size(12.0)
+                                                                        .color(if selected {
+                                                                            ui.visuals()
+                                                                                .selection
+                                                                                .stroke
+                                                                                .color
+                                                                        } else {
+                                                                            ui.visuals()
+                                                                                .text_color()
+                                                                        }),
+                                                                )
+                                                                .frame(false),
+                                                            )
+                                                            .on_hover_text("关闭标签并断开连接")
+                                                            .clicked()
+                                                        {
+                                                            tab_action = Some((
+                                                                index,
+                                                                TabAction::Close(
+                                                                    CloseTabs::Current,
+                                                                ),
+                                                            ));
+                                                        }
                                                     });
+                                                });
                                             if selected && reveal_selected {
                                                 frame.response.scroll_to_me(None);
                                             }
@@ -4491,6 +4621,16 @@ mod tests {
             assert!(std::time::Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(5));
         }
+        assert!(!app.config.session_options.clear_scrollback_on_close);
+        let terminal = app.tabs[app.active].terminal.clone();
+        {
+            let mut terminal = terminal.lock().unwrap();
+            terminal.feed(b"retained-history\r\n");
+            terminal.feed("output\r\n".repeat(80).as_bytes());
+            terminal.feed(b"retained-screen");
+        }
+        let history_size = terminal.lock().unwrap().snapshot().history_size;
+        assert!(history_size > 0);
         drop(listener.accept().unwrap());
         while !app.tabs[app.active].finished {
             app.poll();
@@ -4500,11 +4640,41 @@ mod tests {
         let tab = &app.tabs[app.active];
         assert!(!tab.local && !tab.connected);
         assert_eq!(tab.title, profile.name);
+        {
+            let mut terminal = terminal.lock().unwrap();
+            assert_eq!(terminal.snapshot().history_size, history_size);
+            assert!(terminal.find("retained-history", None, false).is_some());
+            assert!(terminal.find("retained-screen", None, false).is_some());
+            terminal.bottom();
+        }
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
             app.ui(ui, &mut eframe::Frame::_new_kittest())
         });
         assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.job.text.contains("已断开"))));
         output.textures_delta.clear();
+        for visuals in [egui::Visuals::dark(), egui::Visuals::light()] {
+            ctx.set_visuals(visuals);
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(800.0, 600.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| app.ui(ui, &mut eframe::Frame::_new_kittest()),
+            );
+            assert!(output.shapes.iter().any(|shape| matches!(&shape.shape,
+                egui::Shape::Text(text) if text.galley.job.text.contains("已断开"))));
+            assert!(
+                terminal
+                    .lock()
+                    .unwrap()
+                    .find("retained-screen", None, false)
+                    .is_some()
+            );
+            output.textures_delta.clear();
+        }
         let original = app.tabs[app.active].id;
         let count = app.tabs.len();
         app.chrome_action(2, &ctx);
@@ -4527,6 +4697,31 @@ mod tests {
         }
         assert_eq!(app.tabs.len(), count);
         assert_eq!(app.tabs[app.active].id, original);
+        // Explicit opt-in still clears the terminal when the connection closes.
+        app.config.session_options.clear_scrollback_on_close = true;
+        app.tabs[app.active]
+            .terminal
+            .lock()
+            .unwrap()
+            .feed(b"clear-on-request");
+        app.tabs[app.active]
+            .connection
+            .as_ref()
+            .unwrap()
+            .disconnect();
+        while !app.tabs[app.active].finished {
+            app.poll();
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            app.tabs[app.active]
+                .terminal
+                .lock()
+                .unwrap()
+                .find("clear-on-request", None, false)
+                .is_none()
+        );
         let index = app.active;
         close_tabs(&mut app.tabs, &mut app.active, index, CloseTabs::Current);
         assert!(
@@ -4605,6 +4800,27 @@ mod tests {
         assert!(tab.render_snapshot.is_some());
         frame(&ctx, &mut tab, vec![], false);
         drop(guard);
+    }
+
+    #[test]
+    fn tunnel_only_tabs_never_accept_terminal_or_ai_commands() {
+        let (ctx, mut tab) = setup();
+        tab.profile.tunnel_only = true;
+        tab.profile
+            .tunnels
+            .push(rshell_core::tunnel::Rule::default());
+        tab.test_sent.clear();
+        assert!(!tab.command_ready());
+        tab.input(b"dangerous-command\r".to_vec());
+        frame(
+            &ctx,
+            &mut tab,
+            vec![egui::Event::Text("whoami".into())],
+            true,
+        );
+        assert!(tab.test_sent.is_empty());
+        tab.profile.tunnel_only = false;
+        assert!(tab.command_ready());
     }
 
     #[test]
@@ -4724,6 +4940,94 @@ mod tests {
         );
         assert!(written(&tab).is_empty());
         assert!(tab.pending_paste.is_some());
+    }
+
+    #[test]
+    fn ctrl_v_reaches_terminal_and_explicit_paste_stays_available() {
+        let (ctx, mut tab) = setup();
+        for alternate in [false, true] {
+            if alternate {
+                tab.terminal.lock().unwrap().feed(b"\x1b[?1049h");
+            }
+            tab.test_sent.clear();
+            let mut input = egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: egui::Key::V,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::CTRL,
+                }],
+                ..Default::default()
+            };
+            text_edit_clipboard_shortcuts(&ctx, &mut input);
+            frame(&ctx, &mut tab, input.events, true);
+            assert_eq!(written(&tab), [22]);
+            assert!(tab.pending_paste.is_none());
+        }
+        for (key, modifiers) in [
+            (egui::Key::V, egui::Modifiers::CTRL | egui::Modifiers::SHIFT),
+            (egui::Key::Insert, egui::Modifiers::SHIFT),
+        ] {
+            tab.test_sent.clear();
+            let output = frame_config(
+                &ctx,
+                &mut tab,
+                vec![egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                }],
+                true,
+                &Config::default(),
+            );
+            assert!(written(&tab).is_empty());
+            assert!(output.viewport_output.values().any(|viewport| {
+                viewport
+                    .commands
+                    .iter()
+                    .any(|cmd| matches!(cmd, egui::ViewportCommand::RequestPaste))
+            }));
+        }
+    }
+
+    #[test]
+    fn text_fields_keep_native_clipboard_shortcuts() {
+        let ctx = egui::Context::default();
+        let mut text = String::from("editable");
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.add(egui::TextEdit::singleline(&mut text))
+                .request_focus();
+        });
+        output.textures_delta.clear();
+        let mut input = egui::RawInput {
+            events: [egui::Key::C, egui::Key::X, egui::Key::V]
+                .into_iter()
+                .map(|key| egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::CTRL,
+                })
+                .collect(),
+            ..Default::default()
+        };
+        text_edit_clipboard_shortcuts(&ctx, &mut input);
+        assert!(matches!(
+            input.events.as_slice(),
+            [egui::Event::Copy, egui::Event::Cut]
+        ));
+        let mut output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        assert!(output.viewport_output.values().any(|viewport| {
+            viewport
+                .commands
+                .iter()
+                .any(|cmd| matches!(cmd, egui::ViewportCommand::RequestPaste))
+        }));
+        output.textures_delta.clear();
     }
 
     #[test]

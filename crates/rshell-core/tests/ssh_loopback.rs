@@ -1151,3 +1151,144 @@ async fn managed_private_key_authentication() {
     }
     server.abort();
 }
+
+#[tokio::test]
+async fn sftp_resume_upload_download_tree_and_changed_source() {
+    use rshell_core::transfer::{self, Request, Resume};
+    let (profile, config, state, server) = server().await;
+    let runtime = tokio::runtime::Handle::current();
+    let mut connection = ssh::connect(
+        &runtime,
+        profile,
+        "test-only-secret".into(),
+        config,
+        Sink(Arc::new(Mutex::new(vec![]))),
+    );
+    connected(&mut connection).await;
+    let dir = support::tempdir();
+    let source = dir.path().join("source");
+    let bytes = vec![37_u8; 1024 * 1024];
+    tokio::fs::write(&source, &bytes).await.unwrap();
+    let resume = Resume::default();
+    let request = Request::Upload {
+        local: source.clone(),
+        remote: "/slow-resume".into(),
+    };
+    let mut job =
+        transfer::start_resumable(&runtime, &connection, request.clone(), resume.clone()).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), job.progress.changed())
+        .await
+        .unwrap()
+        .unwrap();
+    while *job.progress.borrow() == 0 {
+        job.progress.changed().await.unwrap();
+    }
+    job.cancel();
+    assert!((&mut job.result).await.unwrap().is_err());
+    let partial_len = state
+        .files
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(name, _)| name.starts_with("/slow-resume.rshell-"))
+        .unwrap()
+        .1
+        .len();
+    assert!(partial_len > 0 && partial_len < bytes.len());
+    let mut job =
+        transfer::start_resumable(&runtime, &connection, request.clone(), resume.clone()).unwrap();
+    (&mut job.result).await.unwrap().unwrap();
+    assert_eq!(state.files.lock().unwrap()["/slow-resume"], bytes);
+    assert_eq!(*job.progress.borrow(), bytes.len() as u64);
+    // Completed files are checked, not overwritten or blindly skipped.
+    tokio::fs::write(&source, vec![99_u8; bytes.len()])
+        .await
+        .unwrap();
+    let mut job = transfer::start_resumable(&runtime, &connection, request, resume).unwrap();
+    assert!((&mut job.result).await.unwrap().is_err());
+    assert_eq!(state.files.lock().unwrap()["/slow-resume"], bytes);
+    // Pause a real download, then reuse the same partial file and validate bytes.
+    state
+        .files
+        .lock()
+        .unwrap()
+        .insert("/slow-download".into(), bytes.clone());
+    let target = dir.path().join("download-resumed");
+    let resume = Resume::default();
+    let request = Request::Download {
+        remote: "/slow-download".into(),
+        local: target.clone(),
+    };
+    let mut job =
+        transfer::start_resumable(&runtime, &connection, request.clone(), resume.clone()).unwrap();
+    while *job.progress.borrow() == 0 {
+        tokio::time::timeout(Duration::from_secs(10), job.progress.changed())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    job.cancel();
+    assert!((&mut job.result).await.unwrap().is_err());
+    assert!(!target.exists());
+    // A changed prefix must fail without publishing or discarding the partial.
+    state
+        .files
+        .lock()
+        .unwrap()
+        .get_mut("/slow-download")
+        .unwrap()[0] = 98;
+    let mut job =
+        transfer::start_resumable(&runtime, &connection, request.clone(), resume.clone()).unwrap();
+    assert!((&mut job.result).await.unwrap().is_err());
+    assert!(!target.exists());
+    state
+        .files
+        .lock()
+        .unwrap()
+        .get_mut("/slow-download")
+        .unwrap()[0] = 37;
+    let mut job = transfer::start_resumable(&runtime, &connection, request, resume).unwrap();
+    (&mut job.result).await.unwrap().unwrap();
+    assert_eq!(tokio::fs::read(target).await.unwrap(), bytes);
+    let tree = dir.path().join("tree");
+    tokio::fs::create_dir_all(tree.join("nested/empty"))
+        .await
+        .unwrap();
+    tokio::fs::write(tree.join("nested/data"), &bytes[..1024])
+        .await
+        .unwrap();
+    let resume = Resume::default();
+    let request = Request::Upload {
+        local: tree,
+        remote: "/tree".into(),
+    };
+    for _ in 0..2 {
+        let mut job =
+            transfer::start_resumable(&runtime, &connection, request.clone(), resume.clone())
+                .unwrap();
+        (&mut job.result).await.unwrap().unwrap();
+    }
+    let target = dir.path().join("download-tree");
+    let resume = Resume::default();
+    let request = Request::Download {
+        remote: "/tree".into(),
+        local: target.clone(),
+    };
+    for _ in 0..2 {
+        let mut job =
+            transfer::start_resumable(&runtime, &connection, request.clone(), resume.clone())
+                .unwrap();
+        (&mut job.result).await.unwrap().unwrap();
+    }
+    assert_eq!(
+        tokio::fs::read(target.join("nested/data")).await.unwrap(),
+        bytes[..1024]
+    );
+    assert!(target.join("nested/empty").is_dir());
+    // Independent tasks cannot overwrite a completed target.
+    let mut job =
+        transfer::start_resumable(&runtime, &connection, request, Resume::default()).unwrap();
+    assert!((&mut job.result).await.unwrap().is_err());
+    connection.disconnect();
+    server.abort();
+}

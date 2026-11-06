@@ -857,7 +857,7 @@ impl App {
         let Some(tab) = self
             .ai_selected_connection
             .and_then(|id| self.tabs.iter().find(|tab| tab.id == id))
-            .filter(|tab| tab.connected && (tab.local || tab.profile.protocol == Protocol::Ssh))
+            .filter(|tab| tab.command_ready())
         else {
             self.ai_error = "请先在输入框中选择已连接的目标终端".into();
             return;
@@ -1169,7 +1169,7 @@ impl App {
                                     .truncate()
                                     .show_ui(ui, |ui| {
                                         ui.selectable_value(&mut self.ai_selected_connection, None, "不选择连接");
-                                        for tab in self.tabs.iter().filter(|tab| tab.connected && (tab.local || tab.profile.protocol == Protocol::Ssh)) {
+                                        for tab in self.tabs.iter().filter(|tab| tab.command_ready()) {
                                             ui.selectable_value(&mut self.ai_selected_connection, Some(tab.id), &tab.title);
                                         }
                                     }).response.on_hover_text(connection_tip);

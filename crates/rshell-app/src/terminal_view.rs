@@ -9,6 +9,10 @@ pub fn show(
     config: &rshell_core::config::Config,
     allow_input: bool,
 ) -> Option<String> {
+    crate::tunnel_view::status(ui, tab);
+    if tab.profile.tunnel_only {
+        return None;
+    }
     // A newly spawned process can still be initializing. Do not queue invisible commands.
     let allow_input = allow_input && (!tab.local || tab.connected);
     let mut selection_for_ai = None;
@@ -214,6 +218,7 @@ pub fn show(
         let travel = (scrollbar.height() - thumb_height).max(1.0);
         let fraction = ((scrollbar.bottom() - pos.y - thumb_height * 0.5) / travel).clamp(0.0, 1.0);
         let scroll_offset = (fraction * snapshot.history_size as f32).round() as i32;
+        tab.scroll_remainder = 0.0;
         tab.terminal
             .lock()
             .unwrap()
@@ -514,10 +519,10 @@ pub fn show(
                     ) {
                         ui.ctx()
                             .copy_text(tab.terminal.lock().unwrap().selection_text());
-                    } else if modifiers.ctrl
+                    } else if !modifiers.alt
                         && modifiers.shift
-                        && !modifiers.alt
-                        && key == egui::Key::V
+                        && ((modifiers.ctrl && key == egui::Key::V)
+                            || (!modifiers.ctrl && key == egui::Key::Insert))
                     {
                         ui.ctx()
                             .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
@@ -628,16 +633,17 @@ pub fn show(
             }
         }
     }
-    if response.hovered() && allow_input {
+    if response.hovered() && allow_input && ui.ctx().current_pass_index() == 0 {
         let delta = ui.input(|i| i.smooth_scroll_delta.y);
-        if delta.abs() > 0.1 {
+        let lines = scroll_lines(&mut tab.scroll_remainder, delta, height);
+        if lines != 0 {
             if mouse_reporting {
                 if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
                     let (row, col) = point(pos);
-                    for _ in 0..(delta.abs() / height).ceil().clamp(1.0, 10.0) as usize {
+                    for _ in 0..lines.unsigned_abs().min(100) {
                         tab.input(mouse(
                             snapshot.mode,
-                            if delta > 0.0 { 64 } else { 65 },
+                            if lines > 0 { 64 } else { 65 },
                             row,
                             col,
                             false,
@@ -645,16 +651,15 @@ pub fn show(
                     }
                 }
             } else if snapshot.mode.contains(TermMode::ALT_SCREEN) && !shift {
-                let name = if delta > 0.0 { "ArrowUp" } else { "ArrowDown" };
+                let name = if lines > 0 { "ArrowUp" } else { "ArrowDown" };
                 if let Some(bytes) = rshell_terminal::key(name, false, false, false, snapshot.mode)
                 {
-                    tab.input(bytes);
+                    for _ in 0..lines.unsigned_abs().min(100) {
+                        tab.input(bytes.clone());
+                    }
                 }
             } else {
-                tab.terminal
-                    .lock()
-                    .unwrap()
-                    .scroll(if delta > 0.0 { 3 } else { -3 });
+                tab.terminal.lock().unwrap().scroll(lines);
             }
         }
         if mouse_reporting {
@@ -760,6 +765,21 @@ fn align_ascii_run(galley: &mut std::sync::Arc<egui::Galley>, width: f32) {
     galley.rect.max.x = row.size.x;
 }
 
+// egui already spreads wheel movement over frames. Keep sub-row movement
+// instead of multiplying every animation frame into a fixed three-line jump.
+fn scroll_lines(remainder: &mut f32, delta: f32, row_height: f32) -> i32 {
+    if delta == 0.0 {
+        return 0;
+    }
+    if remainder.signum() != delta.signum() {
+        *remainder = 0.0;
+    }
+    *remainder += delta / row_height.max(1.0);
+    let lines = remainder.trunc() as i32;
+    *remainder -= lines as f32;
+    lines
+}
+
 fn mouse(mode: TermMode, code: u8, row: usize, col: usize, released: bool) -> Vec<u8> {
     if mode.contains(TermMode::SGR_MOUSE) {
         format!(
@@ -793,6 +813,20 @@ fn selection_side(x: f32, left: f32, width: f32) -> rshell_terminal::Side {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn smooth_wheel_distance_is_independent_of_frame_count() {
+        let mut remainder = 0.0;
+        let small: i32 = (0..120)
+            .map(|_| scroll_lines(&mut remainder, 1.0, 20.0))
+            .sum();
+        let mut single = 0.0;
+        assert_eq!(small, scroll_lines(&mut single, 120.0, 20.0));
+        assert_eq!(small, 6);
+        assert_eq!(scroll_lines(&mut remainder, 5.0, 20.0), 0);
+        assert_eq!(scroll_lines(&mut remainder, -20.0, 20.0), -1);
+        assert_eq!(scroll_lines(&mut remainder, 0.0, 20.0), 0);
+    }
 
     #[test]
     fn ascii_batch_preserves_fixed_grid_and_mesh_bounds() {

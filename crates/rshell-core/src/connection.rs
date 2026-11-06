@@ -8,6 +8,7 @@ pub enum Command {
 
 pub enum Event {
     Status(String),
+    Tunnels(Vec<String>),
     HostKey {
         fingerprint: String,
         algorithm: String,

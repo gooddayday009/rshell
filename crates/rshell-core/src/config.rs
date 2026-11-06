@@ -142,6 +142,10 @@ pub struct Profile {
     pub remember_secret: bool,
     #[serde(default)]
     pub keep_alive: KeepAlive,
+    #[serde(default)]
+    pub tunnels: Vec<crate::tunnel::Rule>,
+    #[serde(default)]
+    pub tunnel_only: bool,
 }
 
 impl Default for Profile {
@@ -160,6 +164,8 @@ impl Default for Profile {
             key_path: String::new(),
             remember_secret: false,
             keep_alive: KeepAlive::default(),
+            tunnels: Vec::new(),
+            tunnel_only: false,
         }
     }
 }
@@ -189,6 +195,12 @@ impl Profile {
 
     /// Portable sessions may omit login details that must be supplied before connecting.
     pub(crate) fn validate_portable(&self) -> Result<()> {
+        crate::tunnel::validate(&self.tunnels, self.tunnel_only)?;
+        if self.protocol != Protocol::Ssh
+            && (self.tunnel_only || self.tunnels.iter().any(|r| r.enabled))
+        {
+            bail!("隧道仅支持 SSH 会话，请先禁用隧道规则和仅隧道模式");
+        }
         if self.name.trim().is_empty() {
             bail!("名称不能为空");
         }
@@ -752,6 +764,7 @@ impl Config {
                         profile.validate()?;
                     } else {
                         profile.keep_alive.validate()?;
+                        crate::tunnel::validate(&profile.tunnels, profile.tunnel_only)?;
                     }
                 }
                 config.validate_folders()?;
@@ -786,6 +799,7 @@ impl Config {
                 profile.validate()?;
             } else {
                 profile.keep_alive.validate()?;
+                crate::tunnel::validate(&profile.tunnels, profile.tunnel_only)?;
             }
         }
         self.validate_folders()?;

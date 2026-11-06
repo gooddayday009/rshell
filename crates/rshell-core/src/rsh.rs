@@ -20,6 +20,14 @@ struct SessionFile {
     username: String,
     auth: AuthMethod,
     keep_alive: KeepAlive,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tunnels: Vec<crate::tunnel::Rule>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    tunnel_only: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 fn check_extension(path: &Path) -> Result<()> {
@@ -36,7 +44,11 @@ fn session_file(profile: &Profile) -> Result<SessionFile> {
     // A private-key session must select its key again after import.
     let file = SessionFile {
         format: "RShell session".into(),
-        version: 1,
+        version: if profile.tunnels.is_empty() && !profile.tunnel_only {
+            1
+        } else {
+            3
+        },
         protocol: profile.protocol,
         serial: profile.serial.clone(),
         name: profile.name.clone(),
@@ -49,6 +61,8 @@ fn session_file(profile: &Profile) -> Result<SessionFile> {
             profile.auth.clone()
         },
         keep_alive: profile.keep_alive.clone(),
+        tunnels: profile.tunnels.clone(),
+        tunnel_only: profile.tunnel_only,
     };
     Ok(file)
 }
@@ -128,7 +142,7 @@ pub fn import(path: &Path) -> Result<Profile> {
 }
 
 fn into_profile(file: SessionFile) -> Result<Profile> {
-    if file.format != "RShell session" || file.version != 1 {
+    if file.format != "RShell session" || !matches!(file.version, 1 | 3) {
         bail!("不支持的 .rsh 会话格式或版本");
     }
     let profile = Profile {
@@ -141,6 +155,8 @@ fn into_profile(file: SessionFile) -> Result<Profile> {
         username: file.username,
         auth: file.auth,
         keep_alive: file.keep_alive,
+        tunnels: file.tunnels,
+        tunnel_only: file.tunnel_only,
         key_path: String::new(),
         remember_secret: false,
         folder_id: None,
@@ -153,6 +169,28 @@ fn into_profile(file: SessionFile) -> Result<Profile> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tunnel_export_retains_rules_and_keeps_ordinary_files_compatible() {
+        let profile = Profile {
+            host: "server.test".into(),
+            ..Default::default()
+        };
+        let legacy = serde_json::to_value(session_file(&profile).unwrap()).unwrap();
+        assert_eq!(legacy["version"], 1);
+        assert!(legacy.get("tunnels").is_none());
+        assert!(legacy.get("tunnel_only").is_none());
+        let tunnel = Profile {
+            tunnels: vec![crate::tunnel::Rule::default()],
+            tunnel_only: true,
+            ..profile
+        };
+        let file = session_file(&tunnel).unwrap();
+        assert_eq!(file.version, 3);
+        let restored = into_profile(file).unwrap();
+        assert_eq!(restored.tunnels, tunnel.tunnels);
+        assert!(restored.tunnel_only);
+    }
 
     #[test]
     fn all_sessions_roundtrip_including_serial_without_key_material() {

@@ -8,6 +8,8 @@
 | `crates/rshell-app/src/app.rs` | 会话编辑、标签、首次主机密钥自动记录、偏好、最近连接、连接事件接收 |
 | `crates/rshell-app/src/terminal_view.rs` | 可见网格绘制、选区、光标、IME、键鼠输入、粘贴确认和查找 UI |
 | `crates/rshell-core/src/ssh.rs` | SSH 握手、认证、PTY/shell、保活、取消、有界输入队列和协议事件 |
+| `crates/rshell-core/src/tunnel.rs` | 本地/远程 TCP 转发、SOCKS5 握手、有界数据流和取消清理 |
+| `crates/rshell-app/src/tunnel_view.rs` | SSH 隧道配置、规则状态及仅隧道标签展示 |
 | `crates/rshell-core/src/config.rs` | 会话/主机模型、JSON 版本迁移、备份和原子替换 |
 | `crates/rshell-core/src/credentials.rs` | RShell 独立加密文件读写删除、用户级 DPAPI 加解密和内存清理 |
 | `crates/rshell-terminal/src/lib.rs` | alacritty_terminal 适配、UTF-8/ANSI 解析、网格快照、回看、搜索、键盘编码 |
@@ -27,6 +29,8 @@
 ```
 
 连接实例与保存的会话配置分离，一个配置可以打开多个标签。每个连接有独立终端和命令通道。连接取消使用独立的 watch 通道，不依赖终端绘制。
+
+SSH 隧道在认证后建立，归属于原始连接工作任务；终端渠道复制不复制其监听。`Tunnels` 持有监听/数据流 JoinSet，取消时回收任务并请求取消远程监听；只接受与已配置远程规则精确匹配的 forwarded-tcpip 渠道。仅隧道模式不请求 Shell，复用原有 SSH 保活。界面接收有界事件队列中的隧道状态，不承担网络 I/O。
 
 终端模块不依赖 egui 或 SSH；核心模块不依赖 GUI。应用层通过 `connection::Terminal` 适配接口绑定两者。协议回复（例如光标位置查询）从终端模型回写所属 SSH channel。
 

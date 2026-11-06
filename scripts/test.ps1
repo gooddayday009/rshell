@@ -25,11 +25,14 @@ try {
         $previousScreenshot = $env:RSHELL_SCREENSHOT
         try {
             $env:RSHELL_CONFIG_DIR = Join-Path $artifactDirectory ('smoke-config-' + [Guid]::NewGuid().ToString('N'))
-            foreach ($mode in @('demo', 'tabs-fit', 'tabs-overflow', 'split', 'local', 'serial', 'ai-settings', 'ai-chat', 'ai-chat-long', 'ai-chat-maximized', 'ai-chat-font-large', 'appearance', 'session', 'session-options', 'sftp', 'import', 'telnet', 'host-keys', 'user-keys', 'hidden-chrome', 'history-settings')) {
+            foreach ($mode in @('demo', 'tabs-fit', 'tabs-overflow', 'split', 'local', 'serial', 'ai-settings', 'ai-chat', 'ai-chat-long', 'ai-chat-maximized', 'ai-chat-font-large', 'appearance', 'session', 'session-options', 'sftp', 'import', 'telnet', 'host-keys', 'user-keys', 'hidden-chrome', 'history-settings', 'tunnels', 'tunnels-light', 'tunnel-status')) {
                 $env:RSHELL_SCREENSHOT = Join-Path $artifactDirectory ("smoke-$mode.png")
                 $startedAt = [DateTime]::UtcNow
                 $arguments = @('--smoke-test')
-                if ($mode -in @('demo', 'tabs-fit', 'tabs-overflow', 'split', 'serial', 'ai-settings', 'ai-chat', 'appearance', 'session', 'session-options', 'sftp', 'import', 'telnet', 'host-keys', 'user-keys', 'hidden-chrome', 'history-settings')) { $arguments += '--demo' }
+                if ($mode -in @('demo', 'tabs-fit', 'tabs-overflow', 'split', 'serial', 'ai-settings', 'ai-chat', 'appearance', 'session', 'session-options', 'sftp', 'import', 'telnet', 'host-keys', 'user-keys', 'hidden-chrome', 'history-settings', 'tunnels', 'tunnels-light', 'tunnel-status')) { $arguments += '--demo' }
+                if ($mode -in @('tunnels', 'tunnels-light')) { $arguments += '--smoke-tunnels' }
+                if ($mode -eq 'tunnels-light') { $arguments += '--smoke-light' }
+                if ($mode -eq 'tunnel-status') { $arguments += '--smoke-tunnel-status' }
                 if ($mode -in @('host-keys', 'user-keys', 'hidden-chrome', 'history-settings')) { $arguments += "--smoke-$mode" }
                 if ($mode -eq 'split') { $arguments += '--smoke-split' }
                 if ($mode -eq 'tabs-fit') { $arguments += '--smoke-tabs-fit' }

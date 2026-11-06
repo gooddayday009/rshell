@@ -204,11 +204,10 @@ impl App {
             self.ai_error = error.to_string();
             return;
         }
-        let Some(tab) = self.ai_selected_connection.and_then(|id| {
-            self.tabs.iter().find(|t| {
-                t.id == id && t.connected && (t.local || t.profile.protocol == Protocol::Ssh)
-            })
-        }) else {
+        let Some(tab) = self
+            .ai_selected_connection
+            .and_then(|id| self.tabs.iter().find(|t| t.id == id && t.command_ready()))
+        else {
             self.ai_error = "Agent 需要选择已连接的 PowerShell 或 SSH 终端".into();
             return;
         };

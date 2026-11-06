@@ -18,6 +18,7 @@ pub mod local;
 pub mod serial;
 
 pub mod transfer;
+pub mod tunnel;
 pub mod update;
 mod zmodem;
 

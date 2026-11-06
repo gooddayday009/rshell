@@ -11,7 +11,7 @@ rshell-terminal = { path = "../rshell-terminal" }
 anyhow.workspace = true
 tokio.workspace = true
 uuid.workspace = true
-eframe = { version = "0.37", default-features = false, features = ["clipboard", "default_fonts", "wgpu"] }
+eframe = { version = "0.37", default-features = false, features = ["clipboard", "default_fonts", "links", "wgpu"] }
 egui_extras = { version = "0.37", default-features = false, features = ["svg"] }
 directories = "6"
 zeroize = "1"

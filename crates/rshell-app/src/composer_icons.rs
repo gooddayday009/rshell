@@ -2,6 +2,8 @@
 use eframe::egui;
 
 pub enum Icon {
+    Folder,
+    File,
     Agent,
     Ask,
     Model,
@@ -20,6 +22,8 @@ pub fn find_text<'a>(shape: &'a egui::Shape, text: &str) -> Option<&'a egui::epa
 
 pub fn image(icon: Icon, color: egui::Color32) -> egui::Image<'static> {
     let source = match icon {
+        Icon::Folder => egui::include_image!("../assets/lucide/folder.svg"),
+        Icon::File => egui::include_image!("../assets/lucide/file.svg"),
         Icon::Agent => egui::include_image!("../assets/lucide/bot.svg"),
         Icon::Ask => egui::include_image!("../assets/lucide/message-square-plus.svg"),
         Icon::Model => egui::include_image!("../assets/lucide/cpu.svg"),

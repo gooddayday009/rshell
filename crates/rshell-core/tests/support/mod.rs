@@ -24,6 +24,41 @@ impl russh_sftp::server::Handler for Sftp {
     async fn init(&mut self, _: u32, _: HashMap<String, String>) -> Result<Version, StatusCode> {
         Ok(Version::new())
     }
+    async fn lstat(&mut self, id: u32, path: String) -> Result<Attrs, StatusCode> {
+        self.stat(id, path).await
+    }
+    async fn fstat(&mut self, id: u32, handle: String) -> Result<Attrs, StatusCode> {
+        self.stat(id, handle).await
+    }
+    async fn stat(&mut self, id: u32, path: String) -> Result<Attrs, StatusCode> {
+        let files = self.files.lock().unwrap();
+        let dir = path == "/" || files.contains_key(&format!("{}/", path.trim_end_matches('/')));
+        let size = if dir {
+            0
+        } else {
+            files.get(&path).ok_or(StatusCode::NoSuchFile)?.len() as u64
+        };
+        Ok(Attrs {
+            id,
+            attrs: FileAttributes {
+                size: Some(size),
+                permissions: Some(if dir { 0o040755 } else { 0o100644 }),
+                ..Default::default()
+            },
+        })
+    }
+    async fn mkdir(
+        &mut self,
+        id: u32,
+        path: String,
+        _: FileAttributes,
+    ) -> Result<Status, StatusCode> {
+        self.files
+            .lock()
+            .unwrap()
+            .insert(format!("{}/", path.trim_end_matches('/')), vec![]);
+        Ok(ok(id))
+    }
     async fn close(&mut self, id: u32, _: String) -> Result<Status, StatusCode> {
         Ok(ok(id))
     }
@@ -56,6 +91,9 @@ impl russh_sftp::server::Handler for Sftp {
         offset: u64,
         len: u32,
     ) -> Result<Data, StatusCode> {
+        if handle.starts_with("/slow-download") {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
         let files = self.files.lock().unwrap();
         let file = files.get(&handle).ok_or(StatusCode::NoSuchFile)?;
         let start = offset as usize;
@@ -93,37 +131,46 @@ impl russh_sftp::server::Handler for Sftp {
         files.insert(new, data);
         Ok(ok(id))
     }
-    async fn realpath(&mut self, id: u32, _: String) -> Result<Name, StatusCode> {
+    async fn realpath(&mut self, id: u32, path: String) -> Result<Name, StatusCode> {
         Ok(Name {
             id,
-            files: vec![File::dummy("/")],
+            files: vec![File::dummy(if path == "." { "/" } else { &path })],
         })
     }
     async fn opendir(&mut self, id: u32, path: String) -> Result<Handle, StatusCode> {
         self.listed = false;
         Ok(Handle { id, handle: path })
     }
-    async fn readdir(&mut self, id: u32, _: String) -> Result<Name, StatusCode> {
+    async fn readdir(&mut self, id: u32, path: String) -> Result<Name, StatusCode> {
         if self.listed {
             return Err(StatusCode::Eof);
         }
         self.listed = true;
+        let prefix = format!("{}/", path.trim_end_matches('/'));
+        let files = self.files.lock().unwrap();
+        let mut entries = std::collections::BTreeMap::new();
+        for (name, data) in files.iter() {
+            if let Some(relative) = name.strip_prefix(&prefix) {
+                if relative.is_empty() {
+                    continue;
+                }
+                let dir = relative.contains('/');
+                let name = relative.split('/').next().unwrap().to_string();
+                entries.insert(
+                    name,
+                    FileAttributes {
+                        size: Some(data.len() as u64),
+                        permissions: Some(if dir { 0o040755 } else { 0o100644 }),
+                        ..Default::default()
+                    },
+                );
+            }
+        }
         Ok(Name {
             id,
-            files: self
-                .files
-                .lock()
-                .unwrap()
-                .iter()
-                .map(|(name, data)| {
-                    File::new(
-                        name.trim_start_matches('/'),
-                        FileAttributes {
-                            size: Some(data.len() as u64),
-                            ..Default::default()
-                        },
-                    )
-                })
+            files: entries
+                .into_iter()
+                .map(|(name, attrs)| File::new(name, attrs))
                 .collect(),
         })
     }

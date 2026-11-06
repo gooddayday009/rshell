@@ -12,6 +12,7 @@ pub struct Entry {
     pub directory: bool,
     pub size: u64,
 }
+#[derive(Clone)]
 pub enum Request {
     List(String),
     Download { remote: String, local: PathBuf },
@@ -42,6 +43,35 @@ pub fn start(
     source: &Connection,
     request: Request,
 ) -> Result<Job> {
+    start_inner(runtime, source, request, None)
+}
+#[derive(Clone)]
+pub struct Resume {
+    id: uuid::Uuid,
+    completed: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+}
+impl Default for Resume {
+    fn default() -> Self {
+        Self {
+            id: uuid::Uuid::new_v4(),
+            completed: Default::default(),
+        }
+    }
+}
+pub fn start_resumable(
+    runtime: &tokio::runtime::Handle,
+    source: &Connection,
+    request: Request,
+    resume: Resume,
+) -> Result<Job> {
+    start_inner(runtime, source, request, Some(resume))
+}
+fn start_inner(
+    runtime: &tokio::runtime::Handle,
+    source: &Connection,
+    request: Request,
+    resume: Option<Resume>,
+) -> Result<Job> {
     let session = source
         .ssh_session
         .lock()
@@ -56,21 +86,29 @@ pub fn start(
     let (progress_tx, progress) = watch::channel(0);
     let (tx, result) = oneshot::channel();
     runtime.spawn(async move {
+        let resumable = resume.is_some();
+        let cancel_state = cancelled.clone();
         let result = tokio::select! {
             biased;
-            _ = cancelled.changed() => Err(anyhow::anyhow!("已取消；未完成的 .rshell-*.part 文件可手动删除")),
+            _ = cancelled.changed(), if !resumable => Err(anyhow::anyhow!("已取消；未完成的 .rshell-*.part 文件可手动删除")),
             _ = disconnected.changed() => Err(anyhow::anyhow!("SSH 会话已关闭")),
             result = async {
                 let channel = tokio::time::timeout(std::time::Duration::from_secs(15), session.0.channel_open_session()).await??;
-                channel.request_subsystem(true, "sftp").await?;
+                tokio::time::timeout(std::time::Duration::from_secs(15), channel.request_subsystem(true, "sftp")).await??;
                 if let Request::List(path) = request {
                     let raw = russh_sftp::client::RawSftpSession::new(channel.into_stream());
-                    raw.init().await?;
+                    tokio::time::timeout(std::time::Duration::from_secs(20), raw.init()).await??;
                     return tokio::time::timeout(std::time::Duration::from_secs(30), list(&raw, path)).await?;
                 }
                 let sftp = tokio::time::timeout(std::time::Duration::from_secs(20), SftpSession::new(channel.into_stream())).await??;
-                let result = execute(&sftp, request, &progress_tx).await;
-                let _ = sftp.close().await;
+                let result = if let Some(resume) = resume {
+                    let channel = tokio::time::timeout(std::time::Duration::from_secs(15), session.0.channel_open_session()).await??;
+                    tokio::time::timeout(std::time::Duration::from_secs(15), channel.request_subsystem(true, "sftp")).await??;
+                    let raw = russh_sftp::client::RawSftpSession::new(channel.into_stream());
+                    tokio::time::timeout(std::time::Duration::from_secs(20), raw.init()).await??;
+                    resume_tree(&sftp, &raw, request, &resume, &progress_tx, &cancel_state).await
+                } else { execute(&sftp, request, &progress_tx).await };
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(5), sftp.close()).await;
                 result
             } => result,
         };
@@ -88,9 +126,20 @@ async fn copy(
     writer: &mut (impl tokio::io::AsyncWrite + Unpin),
     progress: &watch::Sender<u64>,
 ) -> Result<()> {
+    copy_cancellable(reader, writer, progress, None).await
+}
+async fn copy_cancellable(
+    reader: &mut (impl tokio::io::AsyncRead + Unpin),
+    writer: &mut (impl tokio::io::AsyncWrite + Unpin),
+    progress: &watch::Sender<u64>,
+    cancel: Option<&watch::Receiver<bool>>,
+) -> Result<()> {
     let mut buffer = vec![0; 64 * 1024];
-    let mut total = 0;
+    let mut total = *progress.borrow();
     loop {
+        if cancel.is_some_and(|c| *c.borrow()) {
+            bail!("已暂停，临时文件已保留");
+        }
         let count =
             tokio::time::timeout(std::time::Duration::from_secs(30), reader.read(&mut buffer))
                 .await??;
@@ -102,6 +151,11 @@ async fn copy(
             writer.write_all(&buffer[..count]),
         )
         .await??;
+        // Acknowledged chunk boundaries make pause/retry deterministic: do not
+        // report a completed chunk while remote writes are still in flight.
+        if cancel.is_some() {
+            tokio::time::timeout(std::time::Duration::from_secs(30), writer.flush()).await??;
+        }
         total += count as u64;
         progress.send_replace(total);
     }
@@ -214,6 +268,238 @@ async fn list(raw: &russh_sftp::client::RawSftpSession, path: String) -> Result<
     raw.close(handle).await?;
     entries.sort_by(|a, b| b.directory.cmp(&a.directory).then(a.name.cmp(&b.name)));
     Ok(Outcome::Listed { path, entries })
+}
+
+// Compare the entire existing prefix before appending. A size-only check would
+// silently combine unrelated source and partial files after a source edit.
+async fn verify_prefix(
+    source: &mut (impl tokio::io::AsyncRead + Unpin),
+    partial: &mut (impl tokio::io::AsyncRead + Unpin),
+    cancel: &watch::Receiver<bool>,
+) -> Result<u64> {
+    let mut a = vec![0; 64 * 1024];
+    let mut b = vec![0; 64 * 1024];
+    let mut offset = 0;
+    loop {
+        if *cancel.borrow() {
+            bail!("已暂停，临时文件已保留");
+        }
+        let count = tokio::time::timeout(std::time::Duration::from_secs(30), partial.read(&mut a))
+            .await??;
+        if count == 0 {
+            return Ok(offset);
+        }
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            source.read_exact(&mut b[..count]),
+        )
+        .await??;
+        if a[..count] != b[..count] {
+            bail!("源文件已变化或临时文件不匹配；已停止续传，请移除任务后重新添加");
+        }
+        offset += count as u64;
+    }
+}
+
+async fn resume_tree(
+    sftp: &SftpSession,
+    raw: &russh_sftp::client::RawSftpSession,
+    request: Request,
+    resume: &Resume,
+    progress: &watch::Sender<u64>,
+    cancel: &watch::Receiver<bool>,
+) -> Result<Outcome> {
+    use tokio::io::AsyncSeekExt;
+    let (local, remote, upload) = match request {
+        Request::Upload { local, remote } => (local, remote, true),
+        Request::Download { local, remote } => (local, remote, false),
+        Request::List(_) => bail!("不是传输任务"),
+    };
+    let mut pending = vec![(local, remote)];
+    let mut visited = 0;
+    while let Some((local, remote)) = pending.pop() {
+        if *cancel.borrow() {
+            bail!("已暂停，临时文件已保留");
+        }
+        visited += 1;
+        if visited + pending.len() > 10000 {
+            bail!("文件夹任务超过 10000 项，请分批传输");
+        }
+        let directory = if upload {
+            let meta = tokio::fs::symlink_metadata(&local).await?;
+            if meta.file_type().is_symlink() || (!meta.is_dir() && !meta.is_file()) {
+                bail!("不传输链接或特殊文件：{}", local.display());
+            }
+            meta.is_dir()
+        } else {
+            let meta = sftp.symlink_metadata(remote.clone()).await?;
+            if meta.is_symlink() || (!meta.is_dir() && !meta.is_regular()) {
+                bail!("不传输链接或特殊文件：{remote}");
+            }
+            meta.is_dir()
+        };
+        if directory {
+            if upload {
+                match sftp.symlink_metadata(remote.clone()).await {
+                    Ok(meta) if meta.is_dir() && !meta.is_symlink() => {}
+                    Ok(_) => bail!("目标不是普通目录：{remote}"),
+                    Err(russh_sftp::client::error::Error::Status(s))
+                        if s.status_code == russh_sftp::protocol::StatusCode::NoSuchFile =>
+                    {
+                        sftp.create_dir(remote.clone()).await?
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+                let mut entries = tokio::fs::read_dir(&local).await?;
+                while let Some(entry) = entries.next_entry().await? {
+                    let name = entry
+                        .file_name()
+                        .into_string()
+                        .map_err(|_| anyhow::anyhow!("文件名不是 UTF-8"))?;
+                    safe_name(&name)?;
+                    pending.push((
+                        entry.path(),
+                        format!("{}/{name}", remote.trim_end_matches('/')),
+                    ));
+                    if visited + pending.len() > 10000 {
+                        bail!("文件夹任务超过 10000 项");
+                    }
+                }
+            } else {
+                match tokio::fs::symlink_metadata(&local).await {
+                    Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {}
+                    Ok(_) => bail!("本地目标不是普通目录"),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        tokio::fs::create_dir(&local).await?
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+                let Outcome::Listed { entries, .. } = tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    list(raw, remote.clone()),
+                )
+                .await??
+                else {
+                    unreachable!()
+                };
+                for entry in entries {
+                    safe_name(&entry.name)?;
+                    pending.push((
+                        local.join(&entry.name),
+                        format!("{}/{}", remote.trim_end_matches('/'), entry.name),
+                    ));
+                    if visited + pending.len() > 10000 {
+                        bail!("文件夹任务超过 10000 项");
+                    }
+                }
+            }
+            continue;
+        }
+        let key = format!("{}\n{remote}", local.display());
+        let completed = resume.completed.lock().unwrap().contains(&key);
+        if upload {
+            let mut source = tokio::fs::File::open(&local).await?;
+            let before = source.metadata().await?;
+            let partial = if completed {
+                remote.clone()
+            } else {
+                format!("{remote}.rshell-{}.part", resume.id)
+            };
+            let exists = match sftp.symlink_metadata(partial.clone()).await {
+                Ok(meta) if meta.is_regular() && !meta.is_symlink() => true,
+                Ok(_) => bail!("续传目标不是普通文件"),
+                Err(russh_sftp::client::error::Error::Status(s))
+                    if s.status_code == russh_sftp::protocol::StatusCode::NoSuchFile =>
+                {
+                    false
+                }
+                Err(e) => return Err(e.into()),
+            };
+            if completed && !exists {
+                bail!("已完成文件被删除，请重新添加任务");
+            }
+            let offset = if exists {
+                verify_prefix(&mut source, &mut sftp.open(partial.clone()).await?, cancel).await?
+            } else {
+                0
+            };
+            progress.send_modify(|n| *n += offset);
+            if completed {
+                if offset != before.len() {
+                    bail!("已完成文件的源已变化");
+                }
+                continue;
+            }
+            let flags = if exists {
+                OpenFlags::WRITE
+            } else {
+                OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::EXCLUDE
+            };
+            let mut output = sftp.open_with_flags(&partial, flags).await?;
+            output.seek(std::io::SeekFrom::Start(offset)).await?;
+            copy_cancellable(&mut source, &mut output, progress, Some(cancel)).await?;
+            output.shutdown().await?;
+            let after = source.metadata().await?;
+            if before.len() != after.len() || before.modified()? != after.modified()? {
+                bail!("传输期间源文件发生变化，未发布目标文件");
+            }
+            sftp.rename(&partial, remote).await?;
+        } else {
+            let mut source = sftp.open(remote.clone()).await?;
+            let before = source.metadata().await?;
+            let partial = if completed {
+                local.clone()
+            } else {
+                local.with_file_name(format!(
+                    ".{}.rshell-{}.part",
+                    local.file_name().context("无文件名")?.to_string_lossy(),
+                    resume.id
+                ))
+            };
+            let exists = match tokio::fs::symlink_metadata(&partial).await {
+                Ok(meta) if meta.is_file() && !meta.file_type().is_symlink() => true,
+                Ok(_) => bail!("续传目标不是普通文件"),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+                Err(e) => return Err(e.into()),
+            };
+            if completed && !exists {
+                bail!("已完成文件被删除，请重新添加任务");
+            }
+            let offset = if exists {
+                verify_prefix(
+                    &mut source,
+                    &mut tokio::fs::File::open(&partial).await?,
+                    cancel,
+                )
+                .await?
+            } else {
+                0
+            };
+            progress.send_modify(|n| *n += offset);
+            if completed {
+                if Some(offset) != before.size {
+                    bail!("已完成文件的源已变化");
+                }
+                continue;
+            }
+            let mut output = tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(!exists)
+                .open(&partial)
+                .await?;
+            output.seek(std::io::SeekFrom::Start(offset)).await?;
+            copy_cancellable(&mut source, &mut output, progress, Some(cancel)).await?;
+            output.sync_all().await?;
+            drop(output);
+            let after = source.metadata().await?;
+            if before.size != after.size || before.mtime != after.mtime {
+                bail!("传输期间源文件发生变化，未发布目标文件");
+            }
+            publish(&partial, &local).await?;
+        }
+        resume.completed.lock().unwrap().insert(key);
+    }
+    Ok(Outcome::Done)
 }
 
 #[cfg(test)]

@@ -149,10 +149,31 @@ pub(crate) struct Handler {
     profile: Profile,
     config: Config,
     events: mpsc::Sender<Event>,
+    forwarded: mpsc::Sender<crate::tunnel::Forwarded>,
 }
 
 impl client::Handler for Handler {
     type Error = anyhow::Error;
+
+    async fn server_channel_open_forwarded_tcpip(
+        &mut self,
+        channel: russh::Channel<client::Msg>,
+        connected_address: &str,
+        connected_port: u32,
+        _: &str,
+        _: u32,
+        reply: client::ChannelOpenHandle,
+        _: &mut client::Session,
+    ) -> Result<()> {
+        // Reject when full/closed; never block SSH protocol processing on a TCP connection.
+        let _ = self.forwarded.try_send(crate::tunnel::Forwarded {
+            channel,
+            address: connected_address.into(),
+            port: connected_port,
+            reply,
+        });
+        Ok(())
+    }
 
     async fn check_server_key(&mut self, key: &PublicKeyOrCertificate) -> Result<bool> {
         if key.certificate().is_some() {
@@ -239,10 +260,12 @@ async fn run(
         channel_buffer_size: 32,
         ..Default::default()
     });
+    let (forwarded, incoming) = mpsc::channel(64);
     let handler = Handler {
         profile: profile.clone(),
         config,
         events: events.clone(),
+        forwarded,
     };
     let stream = tokio::time::timeout(
         Duration::from_secs(15),
@@ -308,7 +331,21 @@ async fn run(
         activity,
     ));
     *published.lock().unwrap() = Arc::downgrade(&session);
-    run_channel(session, terminal, commands, events).await
+    if !profile.tunnel_only && !profile.tunnels.iter().any(|r| r.enabled) {
+        return run_channel(session, terminal, commands, events).await;
+    }
+    let mut tunnels =
+        crate::tunnel::Tunnels::start(session.clone(), profile.tunnels, incoming, &events).await?;
+    if profile.tunnel_only {
+        events.send(Event::Connected).await?;
+        tunnels.run(&events).await
+    } else {
+        tokio::select! {
+            biased;
+            result = run_channel(session, terminal, commands, events.clone()) => result,
+            result = tunnels.run(&events) => result,
+        }
+    }
 }
 
 async fn run_channel(

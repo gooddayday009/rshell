@@ -328,6 +328,40 @@ mod tests {
         app.update_task(ctx.clone(), async { anyhow::bail!("test network failure") });
         wait(&mut app);
         assert!(app.updates.error.contains("test network failure"));
+        let output = render(&mut app, vec![]);
+        let link = output
+            .shapes
+            .iter()
+            .find_map(|shape| {
+                crate::composer_icons::find_text(
+                    &shape.shape,
+                    "GitHub 发布页面 · gooddayday009/rshell",
+                )
+            })
+            .unwrap()
+            .visual_bounding_rect()
+            .center();
+        let mut opened = false;
+        for pressed in [true, false] {
+            let output = render(
+                &mut app,
+                vec![
+                    egui::Event::PointerMoved(link),
+                    egui::Event::PointerButton {
+                        pos: link,
+                        pressed,
+                        button: egui::PointerButton::Primary,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+            opened |= output.platform_output.commands.iter().any(|cmd|
+                matches!(cmd, egui::OutputCommand::OpenUrl(url) if url.url == update::RELEASES_URL));
+        }
+        assert!(
+            opened,
+            "release link must remain clickable after an API failure"
+        );
         app.update_task(ctx.clone(), std::future::pending());
         assert!(app.updates.error.is_empty());
         let output = render(&mut app, vec![]);

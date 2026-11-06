@@ -4,6 +4,7 @@ mod app;
 mod composer_icons;
 mod terminal_appearance;
 mod terminal_view;
+mod tunnel_view;
 mod ui_appearance;
 
 use anyhow::{Context, Result};
@@ -58,6 +59,7 @@ fn run() -> Result<()> {
     let demo = std::env::args().any(|arg| arg == "--demo");
     let smoke = std::env::args().any(|arg| arg == "--smoke-test");
     let options = eframe::NativeOptions {
+        clipboard_shortcuts: false,
         viewport: egui::ViewportBuilder::default()
             .with_title("RShell · Rust SSH Client")
             .with_inner_size([1180.0, 780.0])

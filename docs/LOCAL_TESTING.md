@@ -35,6 +35,12 @@ Remove-Item Env:RSHELL_CONFIG_DIR
 
 ## B. 本机 SSH 手动连接
 
+SSH 隧道自动化验证使用 `cargo test --locked -p rshell-core --test tunnels`。仅使用回环地址上的 russh 和 TCP 测试服务，不连接生产服务器。测试服务不提供 Shell，以验证仅隧道模式。
+
+隧道配置单场景窗口验证：构建后使用隔离的 `RSHELL_CONFIG_DIR`，设置 `RSHELL_SCREENSHOT` 为 `target/test-artifacts` 内绝对路径，运行 `target/debug/rshell.exe --demo --smoke-test --smoke-tunnels`；加 `--smoke-light` 检查浅色主题。`--smoke-tunnel-status` 场景显示 800×520 窗口中的隧道状态，仅使用虚构数据，不建立网络监听。测试运行后自动退出。
+
+`scripts/test.ps1 -Smoke` 包含上述三个隧道窗口场景，连同其他界面共运行 24 个窗口场景；打包前执行整套检查。
+
 终端窗口 1：
 
 ```powershell
@@ -395,3 +401,41 @@ try {
 导出回归检查：从 Xshell 导入缺少用户名的 SSH 会话，分别导出全部 `.rsh` 与 `.xts` 并重新导入，确认会话数量不变、空用户名被保留；连接前仍须补齐用户名。此场景已纳入 `missing_user_is_preserved_and_invalid_host_skipped` 测试。
 
 2026-11-02：空用户名会话导出修复后重新打包 2.3.5。`scripts/test.ps1 -Smoke` 通过 219 项测试（4 项原有忽略）和 21 个窗口场景，日志 `target/release-235-export-fix-checks.log`。安装包与便携包已重建并更新 SHA-256，旧包保存在 `dist/previous-2.3.5-*`。未执行真实安装及真实 Xshell 客户端验收。
+
+
+## 2026-11-05 终端交互修正
+
+已实现：保留“清除滚动缓冲区，当连接关闭”开关及其默认关闭值，不覆盖用户已保存的选择；关闭该选项时断开保留画面与有界滚动历史，开启时仍清空。滚轮/触控板按 egui 平滑位移与行高累计，不再每帧固定滚动三行。禁用窗口后端的全局剪贴板快捷键拦截，终端 Ctrl+V 发送 0x16；Ctrl+Shift+V、Shift+Insert 和菜单粘贴保留，普通文本输入框恢复系统复制/剪切/粘贴快捷键。启用 eframe `links` 特性，使更新窗口发布页链接能够交由系统默认浏览器打开。
+
+针对性回归：`remote_exit_keeps_shell_target_for_toolbar_reconnect` 使用回环 Telnet 验证断开后画面及历史可搜索，深浅主题 800×600 GUI 帧仍可显示断开状态，并验证开启清空开关后手动断开会清空；`ctrl_v_reaches_terminal_and_explicit_paste_stays_available` 覆盖主屏及备用屏幕的 Ctrl+V 和显式粘贴；`text_fields_keep_native_clipboard_shortcuts` 覆盖输入框剪贴板分流；`smooth_wheel_distance_is_independent_of_frame_count` 验证拆成多个动画帧不会放大总滚动距离；更新弹窗 GUI 测试验证 API 失败后点击发布页仍产生正确 OpenUrl 请求。
+
+边界：上述 GUI 检查使用无 GPU 的 egui 控件帧；真实 Vim/OpenSSH 可视块批量编辑、触控板手感及系统默认浏览器实际启动仍待现场验收。没有修改用户配置，没有打包、发布或替换已安装程序；GitHub API 403 限流不由链接修复消除。
+
+已验证：scripts/test.ps1 全部通过（格式、严格 Clippy、223 项通过 / 4 项原有忽略），日志 target/terminal-interaction-checks.log；cargo check 构建通过，日志 target/terminal-links-build.log。
+
+2.3.7 打包验证（2026-11-05）：scripts/test.ps1 -Smoke 通过格式、严格 Clippy、223 项测试（4 项原有忽略）及全部 21 个窗口场景，日志 target/release-237-checks.log；抽查终端和会话设置截图，清空开关保留且默认未选中。Release 与 NSIS 安装器生成成功，日志 target/release-237-build.log、target/release-237-installer.log。安装包和便携 ZIP 位于 dist/RShell-2.3.7-windows-x64-*，附 SHA-256。原方案文档当前缺失，便携包未包含该文件。未执行真实安装、发布及真实 Vim/OpenSSH 验收。
+
+
+### SFTP 双栏与续传（2026-11-05）
+
+已实现：左远程/右本地目录、文件夹/文件线框图标、路径输入/上级/刷新、跨栏文件及文件夹拖放、资源管理器拖入远程栏、串行任务队列（最多 500 项）、暂停/继续/移除/清理完成项、递归文件夹和空目录传输。目录与单个递归任务最多 10000 项；链接及特殊文件报错停止，保留先前已完成部分。同名目录合并，同名文件不覆盖，未完成数据保存在任务专属 `.rshell-*.part` 文件中。续传重新扫描目录，并逐字节检查已有前缀；已完成文件也核对数据。暂停等待当前写入块确认。关闭面板后台继续，关闭会话或退出程序会释放内存队列，临时文件保留，当前未实现重启后恢复。
+
+验证入口：`cargo test --locked -p rshell-core --test ssh_loopback sftp`（本机回环服务，双向续传/源变化/目录递归/空目录/不覆盖）；`cargo test --locked -p rshell transfer_view`（目录目标捕获、危险文件名、深浅主题和窄窗口布局）。单场景窗口使用 `--smoke-test --demo --smoke-sftp`，展示明确标记的演示文件和暂停任务，不连接服务器。
+
+已验证：`scripts/test.ps1` 全部通过（格式、Clippy、工作区测试）；双向文件/文件夹跨栏拖放模拟事件、800/1180 像素宽度深浅主题主要操作未裁切；SFTP 单场景原生窗口截图通过。双向暂停续传、变化前缀拦截、已完成文件复核、嵌套及空目录回环测试通过。
+
+待人工验收：真实 Windows 资源管理器拖入、真实 Linux/OpenSSH 大文件/跨网络中断/权限错误、真实目录符号链接、深浅主题实际缩放。回环验证不代表 Linux/OpenSSH 兼容性通过。批量镜像同步、删除目标多余文件与程序重启后恢复队列未实现。
+
+
+### SFTP 界面反馈修正（2026-11-05）
+
+本地初始位置由后台读取系统桌面目录（UserDirs / Windows Known Folder，兼容重定向）；提供“桌面”快捷入口，显示路径隐藏 Windows 扩展路径前缀，内部路径保留。目录行使用随主题变化的金色线框图标、加粗名称与“文件夹”标记；普通文件显示扩展名和大小。中间竖分隔条调整左右宽度，下方横分隔条调整目录/队列高度，比例在本面板生命周期内保留。队列采用蓝色运行、绿色完成、红色失败、金色暂停、灰色等待标签，附文字，并提供状态计数和筛选。
+
+针对性验证：`cargo test --locked -p rshell transfer_view` 覆盖双向拖放、横竖分隔条真实指针拖动、状态筛选、深浅主题与窄窗口布局。原生截图仍使用标记为测试数据的 `--smoke-sftp` 场景，增加运行、完成、失败和暂停示例；不代表真实任务运行状态。
+
+
+### SFTP 独立窗口与底边缩放（2026-11-05）
+
+SFTP 从内嵌 egui Window 改为 immediate 原生 viewport，独立标题栏、移动、缩放和关闭。系统窗口外框不依赖内容自动适配高度；队列禁用自动收缩，避免空队列/筛选后底边随内容变化。关闭 SFTP 窗口保留会话内任务，重新打开可查看；退出主程序仍结束任务。打开 SFTP 不再阻塞主窗口终端输入。后端不支持多窗口时才使用 egui 嵌入回退。
+
+本机原生窗口验证：找到独立顶层 HWND（非 WS_CHILD），移动到指定桌面坐标，调整到 900×650，跨帧检查坐标尺寸稳定，并确认主窗口没有跟随移动。证据：`target/test-artifacts/sftp-native-verification.txt`。此验证使用演示数据，不连接生产。真实多显示器不同 DPI、用户所见鼠标拖动手感仍需实际验收。
