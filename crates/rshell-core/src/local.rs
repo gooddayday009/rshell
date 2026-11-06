@@ -1,4 +1,4 @@
-//! Native PTY session. All pipe operations run outside the UI thread.
+//! Windows ConPTY session. All pipe operations run outside the UI thread.
 use crate::connection::{Command, Connection, Event, Terminal};
 use anyhow::{Context, Result};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
@@ -41,14 +41,15 @@ fn run(
             pixel_width: 0,
             pixel_height: 0,
         })
-        .context("创建本地 PTY 失败")?;
+        .context("创建 Windows ConPTY 失败")?;
     let mut reader = pair.master.try_clone_reader()?;
     let mut writer = pair.master.take_writer()?;
-    let command = shell_command();
+    let mut command = CommandBuilder::new("powershell.exe");
+    command.args(["-NoLogo", "-NoProfile"]);
     let mut child = pair
         .slave
         .spawn_command(command)
-        .context("启动本地 Shell 失败")?;
+        .context("启动 PowerShell 失败")?;
     drop(pair.slave);
     let (output_tx, output) = blocking::sync_channel(32);
     let reader_thread = std::thread::spawn(move || {
@@ -78,16 +79,11 @@ fn run(
         }
     });
     let result = (|| -> Result<()> {
-        events.blocking_send(Event::Status(format!(
-            "{} 进程已启动，正在初始化命令行…（可切换或关闭标签）",
-            shell_label()
-        )))?;
-        #[cfg(windows)]
+        events.blocking_send(Event::Status(
+            "PowerShell 进程已启动，正在初始化命令行…（可切换或关闭标签）".into(),
+        ))?;
         let mut initial_prompt = InitialPrompt::default();
-        #[cfg(windows)]
         let mut ready = false;
-        #[cfg(not(windows))]
-        events.blocking_send(Event::Connected)?;
         loop {
             if *loop_cancelled.borrow() || loop_cancelled.has_changed().is_err() {
                 return Ok(());
@@ -119,7 +115,6 @@ fn run(
                         writer.write_all(&reply)?;
                         writer.flush()?;
                     }
-                    #[cfg(windows)]
                     if !ready && initial_prompt.feed(&bytes) {
                         ready = true;
                         events.blocking_send(Event::Connected)?;
@@ -148,13 +143,11 @@ fn run(
 
 /// Observe only the initial default prompt of powershell.exe -NoProfile.
 /// This is a startup indicator, not a detector for later nested shells or command completion.
-#[cfg(windows)]
 #[derive(Default)]
 struct InitialPrompt {
     prefix: usize,
     in_prompt: bool,
 }
-#[cfg(windows)]
 impl InitialPrompt {
     fn feed(&mut self, bytes: &[u8]) -> bool {
         // Constant memory even for long paths or unexpected startup output.
@@ -176,7 +169,7 @@ impl InitialPrompt {
     }
 }
 
-#[cfg(all(test, windows))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
@@ -342,28 +335,5 @@ mod tests {
             .unwrap();
         connection.disconnect();
         finished(&mut connection).await;
-    }
-}
-
-pub fn shell_label() -> &'static str {
-    if cfg!(windows) {
-        "Windows PowerShell"
-    } else {
-        "macOS zsh"
-    }
-}
-fn shell_command() -> CommandBuilder {
-    #[cfg(windows)]
-    {
-        let mut command = CommandBuilder::new("powershell.exe");
-        command.args(["-NoLogo", "-NoProfile"]);
-        command
-    }
-    #[cfg(not(windows))]
-    {
-        let mut command = CommandBuilder::new("/bin/zsh");
-        command.args(["-l", "-i"]);
-        command.env("TERM", "xterm-256color");
-        command
     }
 }
