@@ -4,9 +4,11 @@
 
 - 证据：GitHub `v2.3.12` 已通过 Rust/NSIS 初始化，但本地 PowerShell Unicode 测试输出为 `??????`。本机强制控制台代码页 437 后复现相同失败，日志 `target/test-artifacts/local-cp437-repro.log`。
 - 已修复：测试先设置并确认代码页 437，再为 `[Console]::WriteLine` 显式设置 UTF-8，保留中文输入输出、尺寸调整、OpenSSH 输出和退出检查，避免依赖测试机的默认区域设置。只调整测试环境，不改应用启动或全局编码配置，也不跳过测试。
-- 已验证：强制代码页 437 后的修复测试通过，日志 `target/test-artifacts/local-cp437-fixed.log`；本机 `scripts/test.ps1` 的格式检查、严格 Clippy 和 270 项常规测试通过（5 项专项默认忽略），日志 `target/test-artifacts/release-2.3.13-check.log`。GitHub 发布结果需单独确认。
+- 已验证：强制代码页 437 后的修复测试通过，日志 `target/test-artifacts/local-cp437-fixed.log`；本机 `scripts/test.ps1` 的格式检查、严格 Clippy 和 270 项常规测试通过（5 项专项默认忽略），日志 `target/test-artifacts/release-2.3.13-check.log`；分离并行改动后的 `2.3.14` 隔离快照也通过完整常规回归，日志 `target/test-artifacts/release-2.3.14-isolated-check.log`。
 
 - 发布修正：`v2.3.13` 构建已取消，未发布；提交时混入的并行 macOS 本地 Shell 改动已从发布树分离，并保留在开发工作区。使用隔离源码快照验证 `v2.3.14`，避免并行修改影响验收。
+
+- 云端验收：[GitHub Actions #4](https://github.com/gooddayday009/rshell/actions/runs/42173296792) 全部成功，包括常规测试、便携包、安装包及发布。[v2.3.14 Release](https://github.com/gooddayday009/rshell/releases/tag/v2.3.14) 已公开，四个附件齐全；安装包及便携包已匿名下载，文件大小和 SHA256 均匹配。保持未签名，真实安装升级等人工验收仍开放。
 
 ## 2.3.12 自动发布修复（2026-11-06）
 
