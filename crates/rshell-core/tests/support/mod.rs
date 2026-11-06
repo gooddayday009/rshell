@@ -263,5 +263,7 @@ pub fn tempdir() -> tempfile::TempDir {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/test-artifacts");
     let root = std::path::absolute(root).unwrap();
     std::fs::create_dir_all(&root).unwrap();
+    #[cfg(unix)]
+    let root = root.canonicalize().unwrap();
     tempfile::tempdir_in(root).unwrap()
 }

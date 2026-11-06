@@ -10,7 +10,7 @@ for option in "$@"; do
 done
 cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
-cargo test --locked --workspace --all-targets
+cargo test --locked --workspace --all-targets --no-fail-fast
 for option in "$@"; do
 case "$option" in
   --credentials)

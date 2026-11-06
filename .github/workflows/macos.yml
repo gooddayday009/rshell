@@ -27,6 +27,13 @@ jobs:
           persist-credentials: false
       - name: Rust
         run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy && rustup default stable
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target/debug
+          key: macos-${{ matrix.arch }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: macos-${{ matrix.arch }}-${{ hashFiles('Cargo.lock') }}-
       - name: Test
         run: |
           # Disposable runner only: isolate test secrets from the login keychain.
@@ -51,3 +58,10 @@ jobs:
             dist/*.zip
             dist/*.sha256
           if-no-files-found: error
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: |
+            ~/.cargo/registry
+            target/debug
+          key: macos-${{ matrix.arch }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
