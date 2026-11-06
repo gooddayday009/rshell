@@ -195,7 +195,7 @@ impl App {
                         });
                     }
                 } else {
-                    ui.label("自动安装请下载 Windows 安装包；便携 ZIP 可自行解压使用。");
+                    ui.label(if cfg!(windows) { "自动安装请下载 Windows 安装包；便携 ZIP 可自行解压使用。" } else { "下载 ZIP 后解压，退出 RShell 并将 RShell.app 拖入应用程序目录。" });
                 }
                 if ui
                     .add_enabled(
@@ -244,10 +244,14 @@ impl App {
             self.update_task(ctx.clone(), async move {
                 tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
                     anyhow::ensure!(path.is_file(), "下载文件已被移动或删除");
-                    std::process::Command::new("explorer.exe")
-                        .arg("/select,")
-                        .arg(path)
-                        .spawn()?;
+                    std::process::Command::new(if cfg!(windows) {
+                        "explorer.exe"
+                    } else {
+                        "/usr/bin/open"
+                    })
+                    .arg(if cfg!(windows) { "/select," } else { "-R" })
+                    .arg(path)
+                    .spawn()?;
                     Ok(())
                 })
                 .await??;

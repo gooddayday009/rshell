@@ -45,13 +45,23 @@ pub fn font_available(font: TerminalFont) -> bool {
         TerminalFont::CascadiaCode => &["CascadiaCode.ttf", "CascadiaMono.ttf"],
         TerminalFont::Consolas => &["consola.ttf"],
     };
-    let windows = std::env::var_os("WINDIR").unwrap_or_else(|| "C:\\Windows".into());
-    files.iter().any(|file| {
-        std::path::Path::new(&windows)
-            .join("Fonts")
-            .join(file)
-            .is_file()
-    })
+    files
+        .iter()
+        .any(|file| font_paths(file).iter().any(|path| path.is_file()))
+}
+
+pub fn font_paths(file: &str) -> Vec<std::path::PathBuf> {
+    use std::path::PathBuf;
+    if cfg!(target_os = "macos") {
+        let mut paths = vec![PathBuf::from("/Library/Fonts").join(file)];
+        if let Some(home) = std::env::var_os("HOME") {
+            paths.push(PathBuf::from(home).join("Library/Fonts").join(file));
+        }
+        paths
+    } else {
+        let windows = std::env::var_os("WINDIR").unwrap_or_else(|| "C:\\Windows".into());
+        vec![PathBuf::from(windows).join("Fonts").join(file)]
+    }
 }
 
 pub fn colors(theme: TerminalTheme) -> ([u8; 3], [u8; 3], [[u8; 3]; 16]) {

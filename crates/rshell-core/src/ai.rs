@@ -45,16 +45,16 @@ impl ChatHistory {
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 const HISTORY_MAGIC: &[u8] = b"RSHELL-AI-HISTORY-1\0";
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 const HISTORY_ENTROPY: Uuid = Uuid::from_bytes([
     0x52, 0x53, 0x48, 0x45, 0x4c, 0x4c, 0x2d, 0x41, 0x49, 0x2d, 0x48, 0x49, 0x53, 0x54, 0x01, 0x00,
 ]);
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 const MAX_HISTORY_FILE: u64 = 8 * 1024 * 1024;
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 pub fn load_history(path: &std::path::Path) -> Result<ChatHistory> {
     use std::io::Read;
     let file = match std::fs::File::open(path) {
@@ -76,7 +76,7 @@ pub fn load_history(path: &std::path::Path) -> Result<ChatHistory> {
     Ok(history)
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 pub fn save_history(path: &std::path::Path, history: &ChatHistory) -> Result<()> {
     use std::io::Write;
     history.validate()?;
@@ -586,8 +586,9 @@ mod tests {
         assert!(closed, "取消请求后连接仍未释放");
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     #[test]
+    #[cfg_attr(target_os = "macos", ignore = "requires unlocked macOS Keychain")]
     fn encrypted_history_survives_replacement_without_plaintext() {
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/ai-history-tests");

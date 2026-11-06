@@ -92,7 +92,7 @@ impl App {
                 .collapsible(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO).default_size([780.0, 560.0]).show(ctx, |ui| {
             settings_view::dialog_style(ui, self.config.ui_font_size);
-            ui.weak("私钥由当前 Windows 用户加密保护；不会显示私钥正文。名称也作为公钥注释。");
+            ui.weak("私钥由当前系统用户加密保护；不会显示私钥正文。名称也作为公钥注释。");
             egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
                 egui::Grid::new("user_key_list").striped(true).min_col_width(130.0).show(ui, |ui| {
                     ui.strong("名称 / 注释"); ui.strong("类型"); ui.strong("长度（位）"); ui.end_row();

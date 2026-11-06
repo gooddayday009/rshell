@@ -1,4 +1,4 @@
-//! Managed private keys are DPAPI protected; only public properties reach the UI.
+//! Managed private keys use platform-protected encryption; only public properties reach the UI.
 use anyhow::{Context, Result, bail};
 use russh::keys::{Algorithm, HashAlg, PrivateKey, ssh_key};
 use std::{
@@ -162,6 +162,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_os = "macos", ignore = "requires unlocked macOS Keychain")]
     fn managed_keys_roundtrip() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/key-tests");
         fs::create_dir_all(&root).unwrap();

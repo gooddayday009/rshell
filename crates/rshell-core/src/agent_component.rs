@@ -75,6 +75,9 @@ pub fn component_info() -> Result<ComponentInfo> {
 
 /// Read-only lookup. Does not create directories, download or execute anything.
 pub async fn find_component(bundled: &Path) -> Result<Option<PathBuf>> {
+    if !cfg!(windows) {
+        return Ok(None);
+    }
     if tokio::fs::metadata(bundled)
         .await
         .is_ok_and(|m| m.is_file())
@@ -122,6 +125,7 @@ pub async fn ensure_component(
     bundled: PathBuf,
     progress: impl Fn(String) + Send + Sync + 'static,
 ) -> Result<PathBuf> {
+    ensure!(cfg!(windows), "此 Agent 组件仅支持 Windows");
     if tokio::fs::metadata(&bundled)
         .await
         .is_ok_and(|m| m.is_file())
@@ -530,6 +534,15 @@ mod tests {
         let root = root();
         let executable = root.path().join("rshell-agent-sdk.exe");
         std::fs::write(&executable, b"fixture").unwrap();
+        if !cfg!(windows) {
+            assert!(find_component(&executable).await.unwrap().is_none());
+            assert!(
+                ensure_component(executable, |_| panic!("must not download"))
+                    .await
+                    .is_err()
+            );
+            return;
+        }
         assert_eq!(
             ensure_component(executable.clone(), |_| panic!("must not download"))
                 .await

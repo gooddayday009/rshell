@@ -23,36 +23,43 @@ pub fn available_ports() -> Result<Vec<String>> {
 
 fn open(settings: &SerialSettings) -> Result<Box<dyn serialport::SerialPort>> {
     settings.validate()?;
-    serialport::new(settings.port_name.to_ascii_uppercase(), settings.baud_rate)
-        .data_bits(match settings.data_bits {
-            5 => serialport::DataBits::Five,
-            6 => serialport::DataBits::Six,
-            7 => serialport::DataBits::Seven,
-            _ => serialport::DataBits::Eight,
-        })
-        .stop_bits(if settings.stop_bits == 2 {
-            serialport::StopBits::Two
+    serialport::new(
+        if cfg!(windows) {
+            settings.port_name.to_ascii_uppercase()
         } else {
-            serialport::StopBits::One
-        })
-        .parity(match settings.parity {
-            SerialParity::None => serialport::Parity::None,
-            SerialParity::Odd => serialport::Parity::Odd,
-            SerialParity::Even => serialport::Parity::Even,
-        })
-        .flow_control(match settings.flow_control {
-            SerialFlowControl::None => serialport::FlowControl::None,
-            SerialFlowControl::Software => serialport::FlowControl::Software,
-            SerialFlowControl::Hardware => serialport::FlowControl::Hardware,
-        })
-        .timeout(Duration::from_millis(250))
-        .open()
-        .with_context(|| {
-            format!(
-                "打开串口 {} 失败（请检查设备、占用和参数）",
-                settings.port_name
-            )
-        })
+            settings.port_name.clone()
+        },
+        settings.baud_rate,
+    )
+    .data_bits(match settings.data_bits {
+        5 => serialport::DataBits::Five,
+        6 => serialport::DataBits::Six,
+        7 => serialport::DataBits::Seven,
+        _ => serialport::DataBits::Eight,
+    })
+    .stop_bits(if settings.stop_bits == 2 {
+        serialport::StopBits::Two
+    } else {
+        serialport::StopBits::One
+    })
+    .parity(match settings.parity {
+        SerialParity::None => serialport::Parity::None,
+        SerialParity::Odd => serialport::Parity::Odd,
+        SerialParity::Even => serialport::Parity::Even,
+    })
+    .flow_control(match settings.flow_control {
+        SerialFlowControl::None => serialport::FlowControl::None,
+        SerialFlowControl::Software => serialport::FlowControl::Software,
+        SerialFlowControl::Hardware => serialport::FlowControl::Hardware,
+    })
+    .timeout(Duration::from_millis(250))
+    .open()
+    .with_context(|| {
+        format!(
+            "打开串口 {} 失败（请检查设备、占用和参数）",
+            settings.port_name
+        )
+    })
 }
 
 struct PortIo(Box<dyn serialport::SerialPort>);

@@ -1,8 +1,8 @@
 use crate::config::{AuthMethod, Config, KeepAlive, Profile, Trust};
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 use crate::user_keys::load as load_secret_key;
 use anyhow::{Context, Result, bail};
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 use russh::keys::load_secret_key;
 use russh::{
     ChannelMsg, Disconnect, client,

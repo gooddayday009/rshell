@@ -32,3 +32,7 @@ git push origin v2.3.11
 安装包仍未签名；SHA256 仅校验文件一致性，不提供发布者身份认证。自动构建和本机 russh 测试不替代真实 Linux/OpenSSH、干净 Windows 安装升级、真实输入法及全屏应用等人工验收。
 
 工作流配置已实现；首次 GitHub 托管构建、Release 上传和匿名下载校验仍需线上验证。
+
+## macOS 构建入口
+
+在对应架构 Mac 上运行 `bash scripts/test-macos.sh`，再运行 `bash scripts/build-macos.sh arm64` 或 `x64`。产物放入 `dist/`，附 SHA-256；目前仅 ad-hoc 签名。`.github/workflows/macos.yml` 上传 CI 构建产物，不自动发布 Release。Mac 编译、完整窗口冒烟、钥匙串和安装验收完成后才能作为正式支持发布，详见 [MACOS.md](MACOS.md)。

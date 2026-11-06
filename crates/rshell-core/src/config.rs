@@ -90,7 +90,12 @@ pub enum SerialFlowControl {
 impl Default for SerialSettings {
     fn default() -> Self {
         Self {
-            port_name: "COM1".into(),
+            port_name: if cfg!(target_os = "macos") {
+                "/dev/cu.usbserial"
+            } else {
+                "COM1"
+            }
+            .into(),
             baud_rate: 115200,
             data_bits: 8,
             stop_bits: 1,
@@ -104,12 +109,20 @@ impl SerialSettings {
     pub fn validate(&self) -> Result<()> {
         let name = self.port_name.to_ascii_uppercase();
         let number = name.strip_prefix("COM").unwrap_or("");
-        if number.is_empty()
-            || !number.bytes().all(|c| c.is_ascii_digit())
-            || number.starts_with('0')
-            || number.parse::<u16>().is_err()
-        {
-            bail!("请输入有效的串口名称，例如 COM1 或 COM12");
+        let windows_port = !number.is_empty()
+            && number.bytes().all(|c| c.is_ascii_digit())
+            && !number.starts_with('0')
+            && number.parse::<u16>().is_ok();
+        let macos_port = cfg!(target_os = "macos")
+            && self.port_name.strip_prefix("/dev/").is_some_and(|name| {
+                (name.starts_with("cu.") || name.starts_with("tty."))
+                    && name.len() > 4
+                    && name
+                        .bytes()
+                        .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))
+            });
+        if !windows_port && !macos_port {
+            bail!("请输入有效的串口名称：Windows 使用 COM1，macOS 使用 /dev/cu.* 或 /dev/tty.*");
         }
         if self.baud_rate == 0
             || !(5..=8).contains(&self.data_bits)
@@ -1096,6 +1109,25 @@ mod tests {
 #[cfg(test)]
 mod serial_tests {
     use super::*;
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_serial_paths_are_bounded_to_device_names() {
+        let mut settings = SerialSettings::default();
+        for path in ["/dev/cu.usbserial-123", "/dev/tty.usbmodem123"] {
+            settings.port_name = path.into();
+            settings.validate().unwrap();
+        }
+        for path in [
+            "/dev/cu.",
+            "/dev/tty.",
+            "/dev/cu.a/../../file",
+            "/tmp/cu.usbserial",
+            "/dev/cu.a\n",
+        ] {
+            settings.port_name = path.into();
+            assert!(settings.validate().is_err());
+        }
+    }
     #[test]
     fn old_profile_defaults_to_ssh_and_serial_roundtrips_without_ssh_fields() {
         let mut value = serde_json::to_value(Profile::default()).unwrap();

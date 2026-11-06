@@ -15,6 +15,10 @@ mod tests;
 #[path = "jumpserver_credentials.rs"]
 pub mod credentials;
 
+#[cfg(target_os = "macos")]
+#[path = "jumpserver_credentials_macos.rs"]
+pub mod credentials;
+
 const MAX_RESPONSE: usize = 4 * 1024 * 1024;
 const MAX_ITEMS: usize = 20_000;
 

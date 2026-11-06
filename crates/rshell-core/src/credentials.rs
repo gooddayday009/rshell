@@ -1,12 +1,14 @@
-//! RShell-owned encrypted files, protected by current-user Windows DPAPI.
+//! RShell-owned encrypted files, protected by Windows DPAPI or a macOS Keychain key.
 use anyhow::{Context, Result, bail};
+#[cfg(windows)]
+use std::ptr;
 use std::{
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
-    ptr,
 };
 use uuid::Uuid;
+#[cfg(windows)]
 use windows_sys::Win32::{Foundation::LocalFree, Security::Cryptography::*};
 use zeroize::Zeroizing;
 
@@ -14,6 +16,7 @@ pub struct EncryptedCredentials(pub PathBuf);
 const MAX_FILE_SIZE: u64 = 65536;
 const MAGIC: &[u8] = b"RSHELL-SECRET-1\0";
 
+#[cfg(windows)]
 pub(crate) fn crypt(id: Uuid, bytes: &[u8], protect: bool) -> Result<Zeroizing<Vec<u8>>> {
     let mut input_bytes = Zeroizing::new(bytes.to_vec());
     let input = CRYPT_INTEGER_BLOB {
@@ -123,11 +126,15 @@ fn write_file(temporary: &Path, path: &Path, encrypted: &[u8]) -> Result<()> {
     fs::rename(temporary, path).context("替换 RShell 加密凭据失败")
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) use crate::macos_credentials::crypt;
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::store::Credentials;
     #[test]
+    #[cfg_attr(target_os = "macos", ignore = "requires unlocked macOS Keychain")]
     fn encrypted_credentials_roundtrip() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/credential-tests");
         fs::create_dir_all(&root).unwrap();

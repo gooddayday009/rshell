@@ -512,7 +512,14 @@ pub fn show(
                     modifiers,
                     ..
                 } if tab.preedit.is_empty() => {
-                    if crate::app::shortcut_matches(
+                    if cfg!(target_os = "macos") && modifiers.mac_cmd && key == egui::Key::C {
+                        ui.ctx()
+                            .copy_text(tab.terminal.lock().unwrap().selection_text());
+                    } else if cfg!(target_os = "macos") && modifiers.mac_cmd && key == egui::Key::V
+                    {
+                        ui.ctx()
+                            .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+                    } else if crate::app::shortcut_matches(
                         &config.shortcuts.copy_selection,
                         key,
                         modifiers,
@@ -600,11 +607,12 @@ pub fn show(
                 egui::Event::Copy => {
                     // eframe maps Ctrl+C to Copy; terminals must still send SIGINT.
                     if ui.input(|i| {
-                        crate::app::shortcut_matches(
-                            &config.shortcuts.copy_selection,
-                            egui::Key::C,
-                            i.modifiers,
-                        )
+                        (cfg!(target_os = "macos") && i.modifiers.mac_cmd)
+                            || crate::app::shortcut_matches(
+                                &config.shortcuts.copy_selection,
+                                egui::Key::C,
+                                i.modifiers,
+                            )
                     }) {
                         ui.ctx()
                             .copy_text(tab.terminal.lock().unwrap().selection_text());

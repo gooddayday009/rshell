@@ -761,12 +761,12 @@ impl App {
                                 ui.label("密码"); ui.add(egui::TextEdit::singleline(&mut *state.password).password(true).desired_width(field_width)); ui.end_row();
                             });
                             ui.horizontal_wrapped(|ui| {
-                                ui.checkbox(&mut state.draft.remember, "记住登录状态").on_hover_text("使用 Windows 凭据管理器保存登录令牌，不保存密码");
+                                ui.checkbox(&mut state.draft.remember, "记住登录状态").on_hover_text("使用 系统凭据存储保存登录令牌，不保存密码");
                                 ui.label("登录保持时间");
                                 ui.add(egui::DragValue::new(&mut state.draft.keep_minutes).range(1..=43200).suffix(" 分钟"));
                             });
                             ui.checkbox(&mut state.draft.remember_password, "记住密码，到期自动登录 / 异常断线重连")
-                                .on_hover_text("密码仅保存到 Windows 凭据管理器；需要 MFA 时弹出验证码窗口。取消勾选并保存配置会删除密码。");
+                                .on_hover_text("密码仅保存到 系统凭据存储；需要 MFA 时弹出验证码窗口。取消勾选并保存配置会删除密码。");
                             ui.small("有效期以本地与服务端较短值为准；延长保持时间需重新登录。");
                             ui.add_space(8.0); ui.separator(); ui.strong("资产同步");
                             ui.horizontal_wrapped(|ui| {

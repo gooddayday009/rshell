@@ -380,10 +380,10 @@ fn executable_code<'a>(
     local: bool,
     blocked: &[String],
 ) -> Result<&'a str, &'static str> {
-    let accepted = if local {
+    let accepted = if local && cfg!(windows) {
         matches!(language, "" | "powershell" | "pwsh")
     } else {
-        matches!(language, "" | "bash" | "sh" | "shell")
+        matches!(language, "" | "bash" | "sh" | "shell" | "zsh")
     };
     if !accepted {
         return Err("代码块语言与目标终端不匹配");
@@ -700,7 +700,8 @@ impl App {
             .ai_selected_connection
             .and_then(|id| self.tabs.iter().find(|t| t.id == id && t.connected));
         let environment = match selected {
-            Some(tab) if tab.local => format!("目标：{}。命令必须使用 PowerShell 语法，代码块使用 powershell 标记，不使用 CMD/bat 语法。若用户手动切换 Shell，先确认当前环境。", tab.execution_identity()),
+            Some(tab) if tab.local && !cfg!(windows) => format!("目标：{}。本地使用 zsh 语法，代码块标记为 zsh；用户手动切换 Shell 后需重新确认环境。", tab.execution_identity()),
+            Some(tab) if tab.local && cfg!(windows) => format!("目标：{}。命令必须使用 PowerShell 语法，代码块使用 powershell 标记，不使用 CMD/bat 语法。若用户手动切换 Shell，先确认当前环境。", tab.execution_identity()),
             Some(tab) => format!("用户选择了 SSH 终端 {}，远端系统与 Shell 尚未确认。先确认环境或明确标注命令适用的 Shell 与前提，不得把远端当成本地 PowerShell。", tab.execution_identity()),
             None => "用户尚未选择执行目标。不要假定操作系统、Shell、权限或安装的软件；生成命令前先确认必要环境。".to_owned(),
         };
@@ -1459,10 +1460,10 @@ impl App {
                     ui.horizontal(|ui| {
                         ui.label("接口类型");
                         egui::ComboBox::from_id_salt("ai_api_format")
-                            .selected_text(match editor.profile.api_format { rshell_core::ai::ApiFormat::OpenAi => "OpenAI Chat Completions", rshell_core::ai::ApiFormat::Anthropic => "Anthropic Messages（支持 Agent）" })
+                            .selected_text(match editor.profile.api_format { rshell_core::ai::ApiFormat::OpenAi => "OpenAI Chat Completions", rshell_core::ai::ApiFormat::Anthropic => "Anthropic Messages" })
                             .show_ui(ui, |ui| {
                                 ui.selectable_value(&mut editor.profile.api_format, rshell_core::ai::ApiFormat::OpenAi, "OpenAI Chat Completions");
-                                ui.selectable_value(&mut editor.profile.api_format, rshell_core::ai::ApiFormat::Anthropic, "Anthropic Messages（支持 Agent）");
+                                ui.selectable_value(&mut editor.profile.api_format, rshell_core::ai::ApiFormat::Anthropic, "Anthropic Messages");
                             });
                     });
                     egui::Grid::new("ai_fields")
@@ -1492,7 +1493,7 @@ impl App {
                         });
                     ui.checkbox(
                         &mut editor.profile.remember_key,
-                        "加密保存 API Key（当前 Windows 用户）",
+                        "加密保存 API Key（当前系统用户）",
                     );
                     ui.weak("取消勾选并保存会删除原密钥；密钥不写入配置 JSON。");
                     ui.weak("填写服务商对应协议的基础地址与模型 ID。Anthropic 地址可带 /v1；选择接口类型不会自动转换服务商协议。会执行模式只支持 Anthropic 格式。");
@@ -1703,6 +1704,38 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_hides_windows_component_and_identifies_zsh() {
+        let (_temp, ctx, mut app) = test_app();
+        for light in [false, true] {
+            ctx.set_visuals(if light {
+                egui::Visuals::light()
+            } else {
+                egui::Visuals::dark()
+            });
+            click_chat_text(&mut app, &ctx, "Agent · 通用问答");
+            let output = chat_frame_width(&mut app, &ctx, vec![], 800.0);
+            assert!(
+                !output
+                    .shapes
+                    .iter()
+                    .any(
+                        |shape| crate::composer_icons::find_text(&shape.shape, "会执行").is_some()
+                    )
+            );
+            text_shape(&output, "命令建议");
+            click_chat_text(&mut app, &ctx, "通用问答");
+        }
+        app.tabs[0].local = true;
+        app.tabs[0].connected = true;
+        app.ai_selected_connection = Some(app.tabs[0].id);
+        assert!(app.ai_system_prompt().content.contains("macOS zsh"));
+        assert_eq!(executable_code("pwd", "zsh", true, &[]), Ok("pwd"));
+        assert!(executable_code("Get-Process", "powershell", true, &[]).is_err());
+        assert!(executable_code("pwd\nls", "zsh", true, &[]).is_err());
+    }
+
+    #[test]
     fn quick_model_switch_updates_default_configuration() {
         let (_temp, ctx, mut app) = test_app();
         let first = AiProfile {
@@ -1737,6 +1770,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn agent_mode_menu_defaults_to_qa_and_requires_explicit_execution_selection() {
         let (_temp, ctx, mut app) = test_app();
         assert!(app.agent_mode);
@@ -2154,6 +2188,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn ai_prompt_and_confirmation_name_shell_and_session() {
         let (_temp, ctx, mut app) = test_app();
         app.tabs[0].local = true;
@@ -2187,6 +2222,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn only_matching_single_line_fenced_commands_are_candidates() {
         let parts = reply_parts("Try:\n```powershell\nGet-Process\n```\nDone");
         assert!(matches!(parts[0], ReplyPart::Text("Try:\n")));

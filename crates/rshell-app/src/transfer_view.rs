@@ -63,9 +63,16 @@ pub struct Browser {
 }
 impl Default for Browser {
     fn default() -> Self {
-        let home = std::env::var_os("USERPROFILE")
-            .map(|p| PathBuf::from(p).join("Desktop"))
-            .unwrap_or_else(|| PathBuf::from("C:\\"));
+        let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+            .map(|p| {
+                let home = PathBuf::from(p);
+                if cfg!(windows) {
+                    home.join("Desktop")
+                } else {
+                    home
+                }
+            })
+            .unwrap_or_else(|| PathBuf::from(if cfg!(windows) { "C:\\" } else { "/" }));
         Self {
             action: None,
             mutation: None,

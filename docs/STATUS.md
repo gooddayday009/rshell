@@ -1,5 +1,11 @@
 # 开发状态
 
+## macOS 适配（2026-11-06）
+
+- 已实现：macOS 本地 zsh PTY、钥匙串保护与加密文件、中文字体回退、Command+C/V、平台更新包过滤、双架构 `.app` 打包脚本及 CI。隐藏 Windows Agent 执行组件入口，保留通用 AI。
+- 已验证：独立构建目录 `target/macos-validation` 下 `scripts/test.ps1 -WithCredentials` 全部通过（格式、严格 Clippy、常规测试、Windows 凭据专项）；日志 `target/macos-support-windows-tests.log`。Windows 本地终端及深/浅主题 AI 侧栏三个针对性窗口冒烟通过并检查截图；两个 macOS Shell 脚本通过 Bash 语法检查。
+- 待完成：macOS 编译、GUI、钥匙串、SSH/SFTP、输入法、安装签名/公证与真实模型均未验收。CI 工作流未运行不计为通过。详见 [MACOS.md](MACOS.md)。
+
 ## 2.3.14 PowerShell Unicode 测试修复（2026-11-06）
 
 - 证据：GitHub `v2.3.12` 已通过 Rust/NSIS 初始化，但本地 PowerShell Unicode 测试输出为 `??????`。本机强制控制台代码页 437 后复现相同失败，日志 `target/test-artifacts/local-cp437-repro.log`。

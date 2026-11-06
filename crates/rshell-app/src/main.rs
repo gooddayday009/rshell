@@ -116,7 +116,8 @@ fn install_fonts(ctx: &egui::Context, ui_font: rshell_core::config::UiFont) {
     ] {
         if let Some(bytes) = files
             .iter()
-            .find_map(|file| fs::read(windows.join("Fonts").join(file)).ok())
+            .flat_map(|file| terminal_appearance::font_paths(file))
+            .find_map(|path| fs::read(path).ok())
         {
             fonts
                 .font_data
@@ -133,8 +134,22 @@ fn install_fonts(ctx: &egui::Context, ui_font: rshell_core::config::UiFont) {
             .entry(egui::FontFamily::Name((*name).into()))
             .or_insert_with(|| vec!["geist_mono".into()]);
     }
-    for filename in ["msyh.ttc", "simhei.ttf", "simsun.ttc"] {
-        if let Ok(bytes) = fs::read(windows.join("Fonts").join(filename)) {
+    let cjk_paths: Vec<PathBuf> = if cfg!(target_os = "macos") {
+        [
+            "/System/Library/Fonts/PingFang.ttc",
+            "/System/Library/Fonts/STHeiti Light.ttc",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .collect()
+    } else {
+        ["msyh.ttc", "simhei.ttf", "simsun.ttc"]
+            .iter()
+            .map(|file| windows.join("Fonts").join(file))
+            .collect()
+    };
+    for path in cjk_paths {
+        if let Ok(bytes) = fs::read(path) {
             fonts
                 .font_data
                 .insert("cjk".into(), egui::FontData::from_owned(bytes).into());

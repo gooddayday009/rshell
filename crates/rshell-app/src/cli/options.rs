@@ -4,7 +4,7 @@ use std::{collections::HashSet, ffi::OsString, path::PathBuf};
 pub const HELP: &str = "RShell CLI — 无界面 SSH / SFTP
 
 默认关闭：请先在 RShell 设置 → 会话 中启用“启用命令行（CLI）”。
-CLI 只主动连接目标服务器，不监听端口。此开关不能隔离同一 Windows 用户下的恶意程序。
+CLI 只主动连接目标服务器，不监听端口。此开关不能隔离同一系统用户下的恶意程序。
 
 用法：
   rshell-cli exec [连接参数] -- \"完整远端命令\"

@@ -1,0 +1,53 @@
+name: macOS validation and packages
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '12.0'
+      RUST_TEST_THREADS: '2'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Rust
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy && rustup default stable
+      - name: Test
+        run: |
+          # Disposable runner only: isolate test secrets from the login keychain.
+          test_keychain="$RUNNER_TEMP/rshell-tests.keychain-db"
+          original_keychain=$(security default-keychain -d user | tr -d '"' | xargs)
+          keychain_password=$(openssl rand -hex 24)
+          trap 'security default-keychain -d user -s "$original_keychain"; security delete-keychain "$test_keychain"' EXIT
+          security create-keychain -p "$keychain_password" "$test_keychain"
+          security list-keychains -d user -s "$test_keychain" "$original_keychain"
+          security default-keychain -d user -s "$test_keychain"
+          security unlock-keychain -p "$keychain_password" "$test_keychain"
+          security set-keychain-settings -lut 3600 "$test_keychain"
+          # Synthetic test key only: multiple test executables must read it without an ACL dialog.
+          security add-generic-password -a master-key-v1 -s com.RShell.RShell.file-encryption -w "$(openssl rand -hex 16)" -A "$test_keychain"
+          bash scripts/test-macos.sh --credentials --smoke
+      - name: Package
+        run: bash scripts/build-macos.sh ${{ matrix.arch }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RShell-macos-${{ matrix.arch }}
+          path: |
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error

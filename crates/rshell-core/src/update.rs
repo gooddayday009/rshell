@@ -86,8 +86,8 @@ fn select_release(bytes: &[u8]) -> Result<Release> {
     let number = latest.tag_name.trim_start_matches('v').to_owned();
     let base = format!("{RELEASES_URL}/download/{}/", latest.tag_name);
     let mut packages = Vec::new();
-    for (suffix, installer) in [("setup.exe", true), ("portable.zip", false)] {
-        let name = format!("RShell-{number}-windows-x64-{suffix}");
+    for (suffix, installer) in package_suffixes() {
+        let name = format!("RShell-{number}-{suffix}");
         let Some(asset) = latest.assets.iter().find(|a| a.name == name) else {
             continue;
         };
@@ -122,7 +122,7 @@ fn select_release(bytes: &[u8]) -> Result<Release> {
         packages.push(Package {
             name,
             size: asset.size,
-            installer,
+            installer: *installer,
             url: asset.browser_download_url.clone(),
             digest,
             checksum_url,
@@ -130,7 +130,7 @@ fn select_release(bytes: &[u8]) -> Result<Release> {
     }
     ensure!(
         !packages.is_empty(),
-        "最新版本未上传 Windows x64 安装包或便携包"
+        "最新版本未上传适用于当前系统和架构的安装包"
     );
     Ok(Release {
         version: number,
@@ -264,6 +264,7 @@ async fn download_with_client(
     Ok(path)
 }
 
+#[cfg(any(windows, test))]
 fn verify_installer(path: &Path, expected: &str) -> Result<()> {
     use std::io::Read;
     ensure!(
@@ -362,6 +363,29 @@ pub fn apply_update(args: &[std::ffi::OsString]) -> Result<()> {
     Ok(())
 }
 
+fn package_suffixes() -> &'static [(&'static str, bool)] {
+    if cfg!(target_os = "macos") {
+        if cfg!(target_arch = "aarch64") {
+            &[("macos-arm64.zip", false)]
+        } else {
+            &[("macos-x64.zip", false)]
+        }
+    } else {
+        &[
+            ("windows-x64-setup.exe", true),
+            ("windows-x64-portable.zip", false),
+        ]
+    }
+}
+#[cfg(not(windows))]
+pub fn launch_install(_path: PathBuf) -> Result<()> {
+    anyhow::bail!("请退出 RShell 后手动替换应用程序")
+}
+#[cfg(not(windows))]
+pub fn apply_update(_args: &[std::ffi::OsString]) -> Result<()> {
+    anyhow::bail!("当前系统不使用 Windows 更新助手")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,8 +406,9 @@ mod tests {
 
     fn release(tag: &str) -> serde_json::Value {
         let name = format!(
-            "RShell-{}-windows-x64-setup.exe",
-            tag.trim_start_matches('v')
+            "RShell-{}-{}",
+            tag.trim_start_matches('v'),
+            package_suffixes()[0].0
         );
         serde_json::json!({"tag_name":tag,"draft":false,"prerelease":false,"assets":[{
             "name":name,"size":3,"browser_download_url":format!("{RELEASES_URL}/download/{tag}/{name}"),

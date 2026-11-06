@@ -460,7 +460,7 @@ impl App {
         ui.weak("点击键位后按新组合键。需要 Ctrl 或 Alt；Esc 取消录入。修改后自动保存。");
         ui.add_space(12.0);
         let names = [
-            "新建本地 PowerShell",
+            "新建本地终端",
             "关闭当前标签",
             "上一个标签",
             "下一个标签",
@@ -550,7 +550,7 @@ impl App {
                 self.submit(Action::CliEnabled(enabled), Pending::Update);
             }
             ui.add(crate::composer_icons::image(crate::composer_icons::Icon::Help, ui.visuals().weak_text_color()))
-                .on_hover_text("默认关闭，旧配置也保持关闭。开启后可从 rshell-cli 执行远端命令和 SFTP 同步，并读取已保存的会话凭据。关闭仅阻止新调用，不中止已运行的任务。此开关不是同一 Windows 用户下的安全隔离边界。");
+                .on_hover_text("默认关闭，旧配置也保持关闭。开启后可从 rshell-cli 执行远端命令和 SFTP 同步，并读取已保存的会话凭据。关闭仅阻止新调用，不中止已运行的任务。此开关不是同一系统用户下的安全隔离边界。");
         });
         ui.weak("启用后可使用已保存的会话凭据；不开放网络监听端口。");
         ui.separator();
@@ -685,9 +685,7 @@ impl App {
             &mut settings.tcp_enabled,
             "网络为空闲状态时发送 TCP 保持活动数据包",
         );
-        ui.small(
-            "TCP 探测使用系统默认时间。保存后下次连接生效；不影响本地 PowerShell 中的 ssh 命令。",
-        );
+        ui.small("TCP 探测使用系统默认时间。保存后下次连接生效；不影响本地终端中的 ssh 命令。");
 
         ui.add_space(16.0);
         let save = ui.button("保存保活设置").clicked();

@@ -138,6 +138,7 @@ impl App {
                             (true, false, "命令建议"),
                             (false, true, "会执行（谨慎选择）"),
                         ] {
+                            if execute && !cfg!(windows) { continue; }
                             if ui
                                 .selectable_label(
                                     self.ai_command_mode == command

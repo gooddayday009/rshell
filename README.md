@@ -16,6 +16,10 @@ RShell 是面向 Windows x64 的原生终端与 SSH 客户端，使用 Rust 开�
 - **个性化界面**：深浅主题、字体与字号设置、终端缩放和历史回看；滚轮与触控板按平滑位移累计滚动。终端内 Ctrl+V 发送给远端应用（如 Vim 可视块模式），粘贴使用 Ctrl+Shift+V 或 Shift+Insert。
 - **密钥与更新**：SSH 主机密钥校验、用户密钥管理，以及应用内更新检查与下载校验；更新窗口的 GitHub 发布页链接通过系统默认浏览器打开。
 
+## macOS 源码支持
+
+已加入 Apple Silicon / Intel 的 macOS 适配与 `.app` 打包脚本，尚待 Mac 实机与 CI 验证。构建、凭据迁移及验收边界见 [macOS 指南](docs/MACOS.md)。Windows 专用 Agent 组件在 macOS 隐藏，保留通用 AI 对话与命令建议。
+
 ## 下载使用
 
 从 [GitHub Releases](https://github.com/gooddayday009/rshell/releases) 下载 Windows x64 安装包或便携 ZIP。支持 Windows 10 1809、Windows 11 及更新系统。

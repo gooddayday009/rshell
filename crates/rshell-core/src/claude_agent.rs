@@ -456,6 +456,7 @@ async fn run_inner(
     events: mpsc::Sender<Event>,
     profile: Option<(crate::ai::AiProfile, Zeroizing<String>)>,
 ) -> Result<String> {
+    anyhow::ensure!(cfg!(windows), "当前系统不支持 Windows Agent 组件");
     settings.validate()?;
     if prompt.len() > 160_000 {
         bail!("Agent 输入超过 160 KB，请新建对话");

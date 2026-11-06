@@ -326,8 +326,10 @@ impl Tab {
     fn execution_identity(&self) -> String {
         if self.local {
             format!(
-                "本地 Windows PowerShell · {} · 会话 {}（启动 Shell；手动切换后需重新确认）",
-                self.title, self.id
+                "本地 {} · {} · 会话 {}（启动 Shell；手动切换后需重新确认）",
+                rshell_core::local::shell_label(),
+                self.title,
+                self.id
             )
         } else {
             format!(
@@ -1186,7 +1188,9 @@ impl App {
             ai_selected_connection: None,
             ai_command_mode: false,
             agent_mode: true,
-            agent_execute: smoke && std::env::args().any(|a| a == "--smoke-agent-execute"),
+            agent_execute: cfg!(windows)
+                && smoke
+                && std::env::args().any(|a| a == "--smoke-agent-execute"),
             agent_context: true,
             agent_context_preview: false,
             agent: None,
@@ -1225,7 +1229,7 @@ impl App {
             tab.terminal.lock().unwrap().feed(
                 concat!(
                     "\x1b[1;36mRShell\x1b[0m  ·  Native Rust terminal\r\n\r\n",
-                    "\x1b[32m+\x1b[0m 原生 Windows 窗口 / SSH / UTF-8 / ANSI\r\n",
+                    "\x1b[32m+\x1b[0m 原生桌面窗口 / SSH / UTF-8 / ANSI\r\n",
                     "\x1b[33m演示模式：这些内容来自本地测试数据，没有连接服务器。\x1b[0m\r\n\r\n",
                     "\x1b[34muser@server\x1b[0m:~$ ls\r\n",
                     "\x1b[36mdeploy/    logs/    scripts/\x1b[0m    README.md\r\n\r\n",
@@ -1884,7 +1888,7 @@ impl App {
     fn start_local(&mut self, ctx: &egui::Context, reconnect_tab: Option<Uuid>) {
         let Some(index) = self.prepare_connection_tab(
             Profile {
-                name: "PowerShell".into(),
+                name: rshell_core::local::shell_label().into(),
                 ..Default::default()
             },
             reconnect_tab,
@@ -1998,7 +2002,15 @@ impl App {
                                     reference.settings.ssh_port
                                 )
                             } else if tab.local {
-                                "本地 Windows PowerShell · 初始提示符已就绪".into()
+                                format!(
+                                    "本地 {} · {}",
+                                    rshell_core::local::shell_label(),
+                                    if cfg!(windows) {
+                                        "初始提示符已就绪"
+                                    } else {
+                                        "进程已启动"
+                                    }
+                                )
                             } else if tab.profile.protocol == Protocol::Telnet {
                                 "已连接 · Telnet 明文".into()
                             } else if tab.profile.tunnel_only {
@@ -2950,7 +2962,7 @@ impl eframe::App for App {
                                 vec![
                                     ("新建 SSH / Telnet / 串口会话…", 0),
                                     ("新建 SSH 隧道连接…", 16),
-                                    ("本地 PowerShell", 1),
+                                    (rshell_core::local::shell_label(), 1),
                                     ("关闭当前标签", 8),
                                 ],
                             ),
@@ -3124,7 +3136,7 @@ impl eframe::App for App {
                     ui.horizontal(|ui| {
                         for (tip, id) in [
                             ("新建 SSH / Telnet / 串口会话", 0),
-                            ("本地 PowerShell", 1),
+                            (rshell_core::local::shell_label(), 1),
                             ("重新连接", 2),
                             ("断开连接", 3),
                             ("复制选区", 4),
@@ -3350,7 +3362,7 @@ impl eframe::App for App {
                     );
                     ui.separator();
                     ui.label(if tab.local {
-                        "Windows · PowerShell · ConPTY".into()
+                        rshell_core::local::shell_label().into()
                     } else {
                         tab.profile.endpoint()
                     });
@@ -3553,7 +3565,10 @@ impl eframe::App for App {
                             ui.add_space(12.0);
                             ui.label("原生 Rust 桌面终端 · SSH 2 · 多标签会话");
                             ui.add_space(24.0);
-                            if ui.button("+ 打开本地 PowerShell").clicked() {
+                            if ui
+                                .button(format!("+ 打开本地 {}", rshell_core::local::shell_label()))
+                                .clicked()
+                            {
                                 local_reopen = true;
                             }
                         });
@@ -4712,7 +4727,7 @@ mod tests {
             },
             |ui| app.ui(ui, &mut eframe::Frame::_new_kittest()),
         );
-        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.job.text.contains("PowerShell"))));
+        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.job.text.contains(rshell_core::local::shell_label()))));
         output.textures_delta.clear();
         let sessions = app.show_sessions;
         app.chrome_action(7, &ctx);
