@@ -40,7 +40,7 @@ jobs:
 
       - name: Set up Rust
         run: |
-          rustup toolchain install stable --profile minimal --component rustfmt clippy
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
           if ($LASTEXITCODE -ne 0) { throw 'Rust installation failed' }
           rustup default stable
           if ($LASTEXITCODE -ne 0) { throw 'Rust toolchain selection failed' }

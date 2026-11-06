@@ -1,5 +1,12 @@
 # 开发状态
 
+## 2.3.12 自动发布修复（2026-11-06）
+
+- 已修复：Rust 安装命令分别传入 `--component rustfmt --component clippy`，避免 `clippy` 被当作工具链名导致 GitHub Actions 初始化失败。
+- 已验证：本机使用已有 stable 工具链执行修正后的组件安装参数成功（加 `--no-update --no-self-update`，未更新本机工具链）。
+- 本机 `scripts/test.ps1` 通过：格式检查、严格 Clippy、270 项常规测试（5 项专项默认忽略）；日志 `target/test-artifacts/release-2.3.12-check.log`。本次仅修复发布配置和版本号，未重新执行窗口冒烟。
+- 发布策略：保留失败的 `v2.3.11` Tag，使用新版本 `v2.3.12` 触发修正后的工作流。GitHub 托管环境继续只执行常规测试，不执行窗口冒烟；实际云端构建与发布结果需单独确认。
+
 ## GitHub 自动发布（2026-11-06）
 
 - 已实现：推送与 workspace 版本一致的稳定版本 `vX.Y.Z` Tag 后，在 Windows runner 运行格式检查、严格 Clippy 和常规测试，构建轻量安装包和便携包，校验 SHA256 并上传四个附件，最后公开 Release。按用户要求，GitHub 托管环境不运行窗口冒烟测试。发布流程见 [RELEASING.md](RELEASING.md)。
