@@ -1,10 +1,11 @@
 # 开发状态
 
-## macOS 适配（2026-11-06）
+## macOS 2.3.20（2026-11-06）
 
-- 已实现：macOS 本地 zsh PTY、钥匙串保护与加密文件、中文字体回退、Command+C/V、平台更新包过滤、双架构 `.app` 打包脚本及 CI。隐藏 Windows Agent 执行组件入口，保留通用 AI。
-- 已验证：独立构建目录 `target/macos-validation` 下 `scripts/test.ps1 -WithCredentials` 全部通过（格式、严格 Clippy、常规测试、Windows 凭据专项）；日志 `target/macos-support-windows-tests.log`。Windows 本地终端及深/浅主题 AI 侧栏三个针对性窗口冒烟通过并检查截图；两个 macOS Shell 脚本通过 Bash 语法检查。
-- 待完成：macOS 编译、GUI、钥匙串、SSH/SFTP、输入法、安装签名/公证与真实模型均未验收。CI 工作流未运行不计为通过。详见 [MACOS.md](MACOS.md)。
+- 已提交并推送平台适配和两处跨平台测试修复，构建源码 `ba16f823c787ef7d5b844ed03e1f058a6bc73c0a`。
+- [CI 42177646857](https://github.com/gooddayday009/rshell/actions/runs/42177646857)：Apple Silicon / Intel 均通过编译、严格 Clippy、常规测试、4 项钥匙串专项和 24 个窗口冒烟场景，完成 Release `.app` 打包和签名检查。
+- 本地 `dist/RShell-2.3.20-macos-arm64.zip`、`dist/RShell-2.3.20-macos-x64.zip` 已核对 SHA-256、版本号及主程序/CLI 架构。Windows `scripts/test.ps1 -WithCredentials -Smoke` 通过。
+- 保持开放：Developer ID 签名、公证、真实服务器与物理串口、真实输入法、全屏应用、性能和用户安装/升级验收。未发布正式 GitHub Release。详见 [macOS 指南](MACOS.md)。
 
 ## 2.3.14 PowerShell Unicode 测试修复（2026-11-06）
 

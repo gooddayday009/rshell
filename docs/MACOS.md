@@ -26,11 +26,14 @@ bash scripts/build-macos.sh arm64  # Apple Silicon
 
 在可交互且已解锁钥匙串的 Mac 上，执行 `bash scripts/test-macos.sh --credentials` 补做凭据专项测试；常规回归中的聊天持久化测试也会访问钥匙串，可能提示授权。测试会创建应用主密钥和临时测试凭据。CI 使用独立临时钥匙串运行专项测试，并执行 `--smoke` 全套窗口冒烟；任务结束删除临时钥匙串。
 
-## 验证边界
+## 2.3.20 验证记录（2026-11-06）
 
-- 已实现：源码平台分支、测试与 `.app`/ZIP 打包脚本，双架构 GitHub Actions 工作流。
-- 已验证：Windows `scripts/test.ps1 -WithCredentials` 全部通过；本地终端和深/浅主题 AI 侧栏三个窗口冒烟通过；Bash 脚本语法检查通过。测试日志：`target/macos-support-windows-tests.log`。
-- 本次本地验证环境是 Windows；Mac 的编译、钥匙串授权、GUI、实际 SSH/SFTP、zsh 子进程退出、中文输入法、拖放、深浅主题与窄侧栏均须在 Mac 单独验证。
-- CI 文件存在不表示 CI 已通过；未提供已验证的 Mac 安装包。性能、全屏应用和原方案中未完成的验收项继续开放。
+- 构建源码提交：`ba16f823c787ef7d5b844ed03e1f058a6bc73c0a`。[双架构 CI](https://github.com/gooddayday009/rshell/actions/runs/42177646857)。
+- Apple Silicon 与 Intel 的格式、严格 Clippy、常规测试、4 项钥匙串专项和 24 个窗口冒烟场景均已通过。常规测试包含本地 zsh 输入/尺寸/退出、回环 SSH/SFTP、CLI 同步及隐藏 Windows Agent 入口；窗口冒烟检查进程退出和截图生成。
+- 修复了两处跨平台测试问题：SFTP 拖放断言固定为 Windows 分隔符、Unix 测试目录保留 `..` 被同步安全校验拒绝；未放宽安全校验。
+- 两种架构的 `.app`/ZIP 已生成，通过 ad-hoc 签名检查；下载到 `dist/` 后另行核对 SHA-256、Info.plist 版本号和主程序/CLI 的 Mach-O 架构。
+- 产物：[Apple Silicon](https://github.com/gooddayday009/rshell/actions/runs/42177646857/artifacts/13484243102)、[Intel](https://github.com/gooddayday009/rshell/actions/runs/42177646857/artifacts/13485232188)。产物有效期以 GitHub 页面为准；尚未创建正式 Release。
+- Windows 完整回归与 `-WithCredentials -Smoke` 已通过，日志 `target/macos-2320-windows-tests.log`。
+- 待实机人工验收：真实中文输入法、真实服务器兼容性、物理串口、拖放体验、全屏应用、性能以及安装/升级流程。CI 的临时钥匙串测试不代表普通用户的首次授权体验已验收。Developer ID 签名与公证仍未接入。
 
 CI 架构标签依据 [GitHub Runner Images](https://github.com/actions/runner-images)；钥匙串调用使用 [security-framework](https://docs.rs/security-framework/3.7.0/security_framework/os/macos/keychain/struct.SecKeychain.html)。

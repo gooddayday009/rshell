@@ -18,7 +18,7 @@ RShell 是面向 Windows x64 的原生终端与 SSH 客户端，使用 Rust 开�
 
 ## macOS 源码支持
 
-已加入 Apple Silicon / Intel 的 macOS 适配与 `.app` 打包脚本，尚待 Mac 实机与 CI 验证。构建、凭据迁移及验收边界见 [macOS 指南](docs/MACOS.md)。Windows 专用 Agent 组件在 macOS 隐藏，保留通用 AI 对话与命令建议。
+2.3.20 的 Apple Silicon / Intel macOS CI 测试与 `.app` 打包已通过，真实输入法与安装体验仍待人工验收。构建、凭据迁移及验收边界见 [macOS 指南](docs/MACOS.md)。Windows 专用 Agent 组件在 macOS 隐藏，保留通用 AI 对话与命令建议。
 
 ## 下载使用
 
