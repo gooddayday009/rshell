@@ -1066,6 +1066,51 @@ async fn sftp_list_binary_roundtrip_collision_cancel_and_session_reuse() {
         .await
         .unwrap();
     eventually(|| output.lock().unwrap().ends_with(b"sftp-shell-alive\r")).await;
+    for (path, new_name, success) in [
+        ("/binary", Some("renamed"), true),
+        ("/renamed", Some("renamed"), false),
+        ("/renamed", Some("../escape"), false),
+        ("/renamed", None, true),
+        ("/", None, false),
+    ] {
+        let mut job = transfer::start(
+            &runtime,
+            &connection,
+            Request::Manage {
+                path: path.into(),
+                new_name: new_name.map(str::to_owned),
+            },
+        )
+        .unwrap();
+        assert_eq!((&mut job.result).await.unwrap().is_ok(), success);
+    }
+    assert!(!state.files.lock().unwrap().contains_key("/renamed"));
+    {
+        let mut files = state.files.lock().unwrap();
+        files.insert("/tree/".into(), vec![]);
+        files.insert("/tree/child/".into(), vec![]);
+        files.insert("/tree/child/data".into(), b"data".to_vec());
+        files.insert("/keep".into(), b"keep".to_vec());
+    }
+    let mut job = transfer::start(
+        &runtime,
+        &connection,
+        Request::Manage {
+            path: "/tree".into(),
+            new_name: None,
+        },
+    )
+    .unwrap();
+    (&mut job.result).await.unwrap().unwrap();
+    assert!(
+        !state
+            .files
+            .lock()
+            .unwrap()
+            .keys()
+            .any(|p| p.starts_with("/tree"))
+    );
+    assert_eq!(state.files.lock().unwrap()["/keep"], b"keep");
     assert_eq!(state.auth_calls.load(Ordering::SeqCst), 1);
     connection.disconnect();
     server.abort();

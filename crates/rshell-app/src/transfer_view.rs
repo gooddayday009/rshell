@@ -33,7 +33,14 @@ struct Task {
     detail: String,
 }
 type LocalResult = Result<(PathBuf, Vec<Entry>), String>;
+struct FileAction {
+    remote: bool,
+    path: String,
+    new_name: Option<String>,
+}
 pub struct Browser {
+    action: Option<FileAction>,
+    mutation: Option<(bool, oneshot::Receiver<Result<(), String>>)>,
     pub open: bool,
     path: String,
     remote_dir: String,
@@ -60,6 +67,8 @@ impl Default for Browser {
             .map(|p| PathBuf::from(p).join("Desktop"))
             .unwrap_or_else(|| PathBuf::from("C:\\"));
         Self {
+            action: None,
+            mutation: None,
             open: false,
             path: ".".into(),
             remote_dir: ".".into(),
@@ -266,6 +275,107 @@ fn size(bytes: u64) -> String {
     }
 }
 impl Browser {
+    fn action_dialog(
+        &mut self,
+        ctx: &egui::Context,
+        runtime: &tokio::runtime::Handle,
+        connection: Option<&Connection>,
+        title: &str,
+    ) {
+        if self.action.as_ref().is_some_and(|a| a.remote) && connection.is_none() {
+            self.action = None;
+        }
+        let Some(action) = &mut self.action else {
+            return;
+        };
+        let mut confirm = false;
+        let mut cancel = false;
+        let response = egui::Modal::new(egui::Id::unique("sftp-file-action")).show(ctx, |ui| {
+            ui.set_max_width(440.0);
+            ui.heading(if action.new_name.is_some() {
+                "重命名"
+            } else {
+                "确认删除"
+            });
+            ui.label(if action.remote {
+                format!("远程主机：{title}")
+            } else {
+                "本地电脑".into()
+            });
+            ui.label(&action.path);
+            let valid = if let Some(name) = &mut action.new_name {
+                ui.text_edit_singleline(name);
+                let valid = transfer::safe_name(name).is_ok();
+                if !valid {
+                    ui.colored_label(ui.visuals().error_fg_color, "请输入有效的单个文件名");
+                }
+                valid
+            } else {
+                ui.label("永久删除，不进入回收站。文件夹及其全部内容将递归删除。此操作无法撤销。");
+                true
+            };
+            ui.horizontal(|ui| {
+                cancel = ui.button("取消").clicked();
+                confirm = ui
+                    .add_enabled(
+                        valid && (!action.remote || connection.is_some()),
+                        egui::Button::new(if action.new_name.is_some() {
+                            "保存名称"
+                        } else {
+                            "确认删除"
+                        }),
+                    )
+                    .clicked();
+            });
+        });
+        if response.should_close() || cancel {
+            self.action = None;
+            return;
+        }
+        if confirm {
+            let action = self.action.take().unwrap();
+            let (tx, rx) = oneshot::channel();
+            let remote = action.remote;
+            if remote {
+                let result = connection
+                    .ok_or_else(|| anyhow::anyhow!("会话已断开"))
+                    .and_then(|c| {
+                        transfer::start(
+                            runtime,
+                            c,
+                            Request::Manage {
+                                path: action.path,
+                                new_name: action.new_name,
+                            },
+                        )
+                    });
+                match result {
+                    Ok(mut job) => {
+                        runtime.spawn(async move {
+                            let r = (&mut job.result)
+                                .await
+                                .unwrap_or_else(|_| Err("操作中断".into()))
+                                .map(|_| ());
+                            let _ = tx.send(r);
+                        });
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(e.to_string()));
+                    }
+                }
+                self.status = "正在操作…".into();
+            } else {
+                runtime.spawn(async move {
+                    let r = transfer::manage_local(PathBuf::from(action.path), action.new_name)
+                        .await
+                        .map_err(|e| e.to_string());
+                    let _ = tx.send(r);
+                });
+                self.local_status = "正在操作…".into();
+            }
+            self.mutation = Some((remote, rx));
+        }
+    }
     pub fn smoke_fixture(&mut self) {
         self.open = true;
         self.initialized = true;
@@ -413,6 +523,36 @@ impl Browser {
         });
     }
     fn poll(&mut self, runtime: &tokio::runtime::Handle, connection: Option<&Connection>) {
+        let result = self
+            .mutation
+            .as_mut()
+            .and_then(|(remote, rx)| match rx.try_recv() {
+                Ok(r) => Some((*remote, r)),
+                Err(oneshot::error::TryRecvError::Closed) => {
+                    Some((*remote, Err("操作中断".into())))
+                }
+                _ => None,
+            });
+        if let Some((remote, result)) = result {
+            self.mutation = None;
+            match result {
+                Ok(()) => {
+                    if remote {
+                        self.list_remote(runtime, connection, self.remote_dir.clone());
+                    } else {
+                        self.list_local(runtime, self.local_dir.clone());
+                    }
+                }
+                Err(e) => {
+                    let status = if remote {
+                        &mut self.status
+                    } else {
+                        &mut self.local_status
+                    };
+                    *status = format!("操作失败（可能部分完成，请刷新）：{e}");
+                }
+            }
+        }
         if let Some(job) = &mut self.listing {
             match job.result.try_recv() {
                 Ok(result) => {
@@ -537,8 +677,10 @@ impl Browser {
         let mut remote_nav = None;
         let mut local_nav = None;
         let mut enqueue = vec![];
+        let mut requested_action = None;
+        let can_manage = self.mutation.is_none();
         let mut content = |ui: &mut egui::Ui| {
-            ui.weak("双击打开文件夹 · 拖到另一栏生成传输任务 · 文件夹按目录结构递归传输");
+            ui.weak("双击打开文件夹 · 右键重命名 / 删除 · 拖到另一栏传输");
             let available = ui.available_size();
             let height = available.y.max(420.0);
             let top_height = (height * self.queue_split).clamp(230.0, height - 150.0);
@@ -712,6 +854,30 @@ impl Browser {
                                                     .to_string_lossy()
                                                     .into_owned()
                                             };
+                                            response.context_menu(|ui| {
+                                                for (label, rename) in
+                                                    [("重命名…", true), ("删除…", false)]
+                                                {
+                                                    if ui
+                                                        .add_enabled(
+                                                            can_manage
+                                                                && transfer::safe_name(&entry.name)
+                                                                    .is_ok(),
+                                                            egui::Button::new(label),
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        *selected = Some(i);
+                                                        requested_action = Some(FileAction {
+                                                            remote,
+                                                            path: path.clone(),
+                                                            new_name: rename
+                                                                .then(|| entry.name.clone()),
+                                                        });
+                                                        ui.close();
+                                                    }
+                                                }
+                                            });
                                             response.dnd_set_drag_payload(DragEntry {
                                                 remote,
                                                 path: path.clone(),
@@ -909,6 +1075,10 @@ impl Browser {
             if let Some(i) = remove {
                 self.tasks.remove(i);
             }
+            if let Some(action) = requested_action.take() {
+                self.action = Some(action);
+            }
+            self.action_dialog(ui.ctx(), runtime, connection, title);
             ui.weak("同名文件不覆盖；关闭面板后台继续。续传记录仅保留在当前会话，关闭会话或退出程序后不保留。");
         };
         ctx.show_viewport_immediate(
@@ -932,6 +1102,9 @@ impl Browser {
             },
         );
         self.open = open;
+        if !open {
+            self.action = None;
+        }
         if let Some(path) = remote_nav {
             self.list_remote(runtime, connection, path);
         }
@@ -1272,5 +1445,119 @@ mod tests {
         }
         assert_eq!(browser.remote_selected, Some(2));
         assert_eq!(browser.local_selected, None);
+    }
+}
+
+#[cfg(test)]
+mod action_tests {
+    use super::*;
+    #[test]
+    fn deletion_requires_click_and_cancel_does_not_dispatch() {
+        for dark in [true, false] {
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let ctx = egui::Context::default();
+            ctx.set_visuals(if dark {
+                egui::Visuals::dark()
+            } else {
+                egui::Visuals::light()
+            });
+            let mut browser = Browser {
+                action: Some(FileAction {
+                    remote: false,
+                    path: r"C:\test\example.txt".into(),
+                    new_name: None,
+                }),
+                ..Default::default()
+            };
+            let frame = |browser: &mut Browser, events| {
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(580.0, 480.0),
+                        )),
+                        events,
+                        ..Default::default()
+                    },
+                    |_| browser.action_dialog(&ctx, runtime.handle(), None, "test"),
+                );
+                output.textures_delta.clear();
+                output
+            };
+            for _ in 0..3 {
+                frame(&mut browser, vec![]);
+            }
+            assert!(browser.mutation.is_none());
+            let output = frame(&mut browser, vec![]);
+            let pos = output
+                .shapes
+                .iter()
+                .find_map(|s| composer_icons::find_text(&s.shape, "取消"))
+                .unwrap()
+                .visual_bounding_rect()
+                .center();
+            frame(&mut browser, vec![egui::Event::PointerMoved(pos)]);
+            for pressed in [true, false] {
+                frame(
+                    &mut browser,
+                    vec![egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    }],
+                );
+            }
+            assert!(browser.action.is_none());
+            assert!(browser.mutation.is_none());
+            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/test-artifacts");
+            std::fs::create_dir_all(&root).unwrap();
+            let dir = tempfile::tempdir_in(root).unwrap();
+            let file = dir.path().join("delete-after-confirm.txt");
+            std::fs::write(&file, b"test").unwrap();
+            browser.action = Some(FileAction {
+                remote: false,
+                path: file.to_string_lossy().into_owned(),
+                new_name: None,
+            });
+            for _ in 0..3 {
+                frame(&mut browser, vec![]);
+            }
+            assert!(file.exists());
+            let output = frame(&mut browser, vec![]);
+            let pos = output
+                .shapes
+                .iter()
+                .filter_map(|s| composer_icons::find_text(&s.shape, "确认删除"))
+                .next_back()
+                .unwrap()
+                .visual_bounding_rect()
+                .center();
+            frame(&mut browser, vec![egui::Event::PointerMoved(pos)]);
+            for pressed in [true, false] {
+                frame(
+                    &mut browser,
+                    vec![egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    }],
+                );
+            }
+            let (_, rx) = browser
+                .mutation
+                .take()
+                .expect("explicit click dispatches deletion");
+            runtime.block_on(async {
+                tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+            });
+            assert!(!file.exists());
+        }
     }
 }

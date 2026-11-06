@@ -15,8 +15,18 @@ pub struct Entry {
 #[derive(Clone)]
 pub enum Request {
     List(String),
-    Download { remote: String, local: PathBuf },
-    Upload { local: PathBuf, remote: String },
+    Manage {
+        path: String,
+        new_name: Option<String>,
+    },
+    Download {
+        remote: String,
+        local: PathBuf,
+    },
+    Upload {
+        local: PathBuf,
+        remote: String,
+    },
 }
 pub enum Outcome {
     Listed { path: String, entries: Vec<Entry> },
@@ -100,6 +110,12 @@ fn start_inner(
                     tokio::time::timeout(std::time::Duration::from_secs(20), raw.init()).await??;
                     return tokio::time::timeout(std::time::Duration::from_secs(30), list(&raw, path)).await?;
                 }
+                if let Request::Manage { path, new_name } = request {
+                    let raw = russh_sftp::client::RawSftpSession::new(channel.into_stream());
+                    tokio::time::timeout(std::time::Duration::from_secs(20), raw.init()).await??;
+                    tokio::time::timeout(std::time::Duration::from_secs(120), manage_remote(&raw, path, new_name)).await??;
+                    return Ok(Outcome::Done);
+                }
                 let sftp = tokio::time::timeout(std::time::Duration::from_secs(20), SftpSession::new(channel.into_stream())).await??;
                 let result = if let Some(resume) = resume {
                     let channel = tokio::time::timeout(std::time::Duration::from_secs(15), session.0.channel_open_session()).await??;
@@ -168,6 +184,7 @@ async fn execute(
     progress: &watch::Sender<u64>,
 ) -> Result<Outcome> {
     match request {
+        Request::Manage { .. } => bail!("仅用于文件管理"),
         Request::List(_) => unreachable!(),
         Request::Download { remote, local } => {
             let partial = partial_path(&local)?;
@@ -234,6 +251,7 @@ pub(crate) async fn headless(
                 bail!("CLI 下载仅支持普通文件");
             }
         }
+        Request::Manage { .. } => bail!("仅用于文件管理"),
         Request::List(_) => unreachable!(),
     }
     let (progress, _) = watch::channel(0);
@@ -354,7 +372,7 @@ async fn resume_tree(
     let (local, remote, upload) = match request {
         Request::Upload { local, remote } => (local, remote, true),
         Request::Download { local, remote } => (local, remote, false),
-        Request::List(_) => bail!("不是传输任务"),
+        Request::List(_) | Request::Manage { .. } => bail!("不是传输任务"),
     };
     let mut pending = vec![(local, remote)];
     let mut visited = 0;
@@ -543,6 +561,79 @@ async fn resume_tree(
     Ok(Outcome::Done)
 }
 
+async fn manage_remote(
+    sftp: &russh_sftp::client::RawSftpSession,
+    path: String,
+    new_name: Option<String>,
+) -> Result<()> {
+    let (parent, name) = path.rsplit_once('/').context("不可操作根目录")?;
+    safe_name(name)?;
+    if let Some(name) = new_name {
+        safe_name(&name)?;
+        let target = format!("{parent}/{name}");
+        match sftp.lstat(target.clone()).await {
+            Err(russh_sftp::client::error::Error::Status(s))
+                if s.status_code == russh_sftp::protocol::StatusCode::NoSuchFile => {}
+            Err(e) => return Err(e.into()),
+            Ok(_) => bail!("目标名称已存在，不覆盖"),
+        }
+        sftp.rename(path, target).await?;
+    } else {
+        let mut stack = vec![(path, false)];
+        let mut count = 0;
+        while let Some((path, visited)) = stack.pop() {
+            count += 1;
+            anyhow::ensure!(count <= 20000, "目录过大，删除已停止");
+            let meta = sftp.lstat(path.clone()).await?.attrs;
+            if meta.is_dir() && !meta.is_symlink() {
+                if visited {
+                    sftp.rmdir(path).await?;
+                } else {
+                    stack.push((path.clone(), true));
+                    let Outcome::Listed { entries, .. } = list(sftp, path.clone()).await? else {
+                        unreachable!()
+                    };
+                    for entry in entries {
+                        let name = entry.name;
+                        if name == "." || name == ".." {
+                            continue;
+                        }
+                        safe_name(&name)?;
+                        anyhow::ensure!(stack.len() < 10000, "目录过大，删除已停止");
+                        stack.push((format!("{path}/{name}"), false));
+                    }
+                }
+            } else {
+                sftp.remove(path).await?;
+            }
+        }
+    }
+    Ok(())
+}
+pub async fn manage_local(path: PathBuf, new_name: Option<String>) -> Result<()> {
+    let parent = path.parent().context("不可操作根目录")?;
+    anyhow::ensure!(path.file_name().is_some(), "不可操作根目录");
+    if let Some(name) = new_name {
+        safe_name(&name)?;
+        let target = parent.join(name);
+        match tokio::fs::symlink_metadata(&target).await {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+            Ok(_) => bail!("目标名称已存在，不覆盖"),
+        }
+        // Windows rename does not replace an existing destination.
+        tokio::fs::rename(path, target).await?;
+    } else {
+        let meta = tokio::fs::symlink_metadata(&path).await?;
+        if meta.is_dir() {
+            tokio::fs::remove_dir_all(path).await?;
+        } else {
+            tokio::fs::remove_file(path).await?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -566,5 +657,44 @@ mod tests {
         tokio::fs::write(&destination, b"old").await.unwrap();
         assert!(publish(&partial, &destination).await.is_err());
         assert_eq!(tokio::fs::read(destination).await.unwrap(), b"old");
+    }
+
+    #[tokio::test]
+    async fn local_rename_collision_and_recursive_delete() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-artifacts");
+        std::fs::create_dir_all(&root).unwrap();
+        let dir = tempfile::tempdir_in(root).unwrap();
+        let source = dir.path().join("source");
+        tokio::fs::create_dir_all(source.join("child"))
+            .await
+            .unwrap();
+        tokio::fs::write(source.join("child/file"), b"data")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("occupied"), b"keep")
+            .await
+            .unwrap();
+        assert!(
+            manage_local(source.clone(), Some("occupied".into()))
+                .await
+                .is_err()
+        );
+        assert!(
+            manage_local(source.clone(), Some("../escape".into()))
+                .await
+                .is_err()
+        );
+        manage_local(source.clone(), Some("renamed".into()))
+            .await
+            .unwrap();
+        assert!(!source.exists());
+        manage_local(dir.path().join("renamed"), None)
+            .await
+            .unwrap();
+        assert!(!dir.path().join("renamed").exists());
+        assert_eq!(
+            tokio::fs::read(dir.path().join("occupied")).await.unwrap(),
+            b"keep"
+        );
     }
 }

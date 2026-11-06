@@ -1,0 +1,92 @@
+name: Release Windows
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      RUST_TEST_THREADS: '2'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Validate release version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $manifest = Get-Content Cargo.toml -Raw
+          $version = [regex]::Match($manifest, '(?ms)^\[workspace\.package\]\s*.*?^version\s*=\s*"([^"]+)"').Groups[1].Value
+          if ($version -notmatch '^\d+\.\d+\.\d+$' -or $env:RELEASE_TAG -cne "v$version") {
+            throw "Expected a stable vX.Y.Z tag matching Cargo.toml; got $env:RELEASE_TAG ($version)"
+          }
+          "RELEASE_VERSION=$version" >> $env:GITHUB_ENV
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt clippy
+          if ($LASTEXITCODE -ne 0) { throw 'Rust installation failed' }
+          rustup default stable
+          if ($LASTEXITCODE -ne 0) { throw 'Rust toolchain selection failed' }
+
+      - name: Install NSIS
+        run: |
+          choco install nsis -y --no-progress
+          if ($LASTEXITCODE -ne 0) { throw 'NSIS installation failed' }
+
+      - name: Test
+        run: ./scripts/test.ps1
+
+      - name: Build portable package
+        run: ./scripts/build.ps1 -Package
+
+      - name: Build installer
+        run: |
+          $candidates = @(
+            "${env:ProgramFiles(x86)}\NSIS\makensis.exe",
+            "${env:ProgramFiles(x86)}\NSIS\Bin\makensis.exe"
+          )
+          $nsis = $candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          if (-not $nsis) { throw 'makensis.exe not found' }
+          ./scripts/build-installer.ps1 -MakensisPath $nsis
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $base = "dist/RShell-$env:RELEASE_VERSION-windows-x64"
+          $packages = @("$base-portable.zip", "$base-setup.exe")
+          $assets = @()
+          foreach ($package in $packages) {
+            $checksum = "$package.sha256"
+            if (-not (Test-Path -LiteralPath $package) -or -not (Test-Path -LiteralPath $checksum)) {
+              throw "Missing package or checksum: $package"
+            }
+            $expected = ((Get-Content -LiteralPath $checksum -Raw).Trim() -split '\s+')[0]
+            if ((Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash -ne $expected) {
+              throw "Checksum mismatch: $package"
+            }
+            $assets += @($package, $checksum)
+          }
+          gh release create $env:RELEASE_TAG @assets --verify-tag --draft --title "RShell $env:RELEASE_TAG" --generate-notes
+          if ($LASTEXITCODE -ne 0) { throw 'Release creation/upload failed; inspect any remaining draft before retrying' }
+          gh release edit $env:RELEASE_TAG --draft=false
+          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed; the release remains a draft' }
