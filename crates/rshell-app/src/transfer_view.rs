@@ -1131,12 +1131,15 @@ mod tests {
     fn drops_capture_both_directories_and_reject_unsafe_names() {
         let mut browser = Browser {
             remote_dir: "/srv".into(),
-            local_dir: PathBuf::from(r"C:\Downloads"),
+            local_dir: PathBuf::from("downloads"),
             ..Default::default()
         };
         browser.enqueue(DragEntry {
             remote: false,
-            path: r"C:\source\folder".into(),
+            path: PathBuf::from("source")
+                .join("folder")
+                .to_string_lossy()
+                .into_owned(),
             name: "folder".into(),
         });
         browser.enqueue(DragEntry {
@@ -1154,7 +1157,7 @@ mod tests {
             matches!(&browser.tasks[0].request, Request::Upload { remote, .. } if remote == "/srv/folder")
         );
         assert!(
-            matches!(&browser.tasks[1].request, Request::Download { local, .. } if local == &PathBuf::from(r"C:\Downloads\file.txt"))
+            matches!(&browser.tasks[1].request, Request::Download { local, .. } if local == &PathBuf::from("downloads").join("file.txt"))
         );
         browser.remote_dir = "/other".into();
         assert!(
