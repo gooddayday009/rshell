@@ -36,3 +36,9 @@ git push origin v2.3.11
 ## macOS 构建入口
 
 在对应架构 Mac 上运行 `bash scripts/test-macos.sh`，再运行 `bash scripts/build-macos.sh arm64` 或 `x64`。产物放入 `dist/`，附 SHA-256；目前仅 ad-hoc 签名。`.github/workflows/macos.yml` 上传 CI 构建产物，不自动发布 Release。Mac 编译、完整窗口冒烟、钥匙串和安装验收完成后才能作为正式支持发布，详见 [MACOS.md](MACOS.md)。
+
+## 三平台统一发布
+
+推送版本标签触发 `Release Windows and macOS`，并行构建 Windows x64、macOS arm64/x64。所有构建完成后，统一校验四个程序包及四个 SHA-256 文件；仅八个资产全部正确时公开正式 Release。发布说明优先使用 `docs/releases/<版本>.md`。
+
+2.3.15 是用户明确指定的版本号调整，沿用已经通过的 2.3.20 应用代码测试证据，本次标签跳过重复测试，仍重新构建全部程序包并校验版本及哈希；其他版本标签维持完整测试。

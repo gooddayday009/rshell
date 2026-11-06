@@ -1,8 +1,16 @@
 name: macOS validation and packages
 on:
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      skip_tests:
+        type: boolean
+        default: false
   push:
     branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "README.md"
   pull_request:
 permissions:
   contents: read
@@ -33,8 +41,11 @@ jobs:
             ~/.cargo/registry
             target/debug
           key: macos-${{ matrix.arch }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
-          restore-keys: macos-${{ matrix.arch }}-${{ hashFiles('Cargo.lock') }}-
+          restore-keys: |
+            macos-${{ matrix.arch }}-${{ hashFiles('Cargo.lock') }}-
+            macos-${{ matrix.arch }}-
       - name: Test
+        if: ${{ !inputs.skip_tests }}
         run: |
           # Disposable runner only: isolate test secrets from the login keychain.
           test_keychain="$RUNNER_TEMP/rshell-tests.keychain-db"

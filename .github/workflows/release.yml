@@ -1,4 +1,4 @@
-name: Release Windows
+name: Release Windows and macOS
 
 on:
   push:
@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
+  windows:
     runs-on: windows-2022
     timeout-minutes: 60
     defaults:
@@ -51,6 +51,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'NSIS installation failed' }
 
       - name: Test
+        if: github.ref_name != 'v2.3.15'
         run: ./scripts/test.ps1
 
       - name: Build portable package
@@ -66,27 +67,37 @@ jobs:
           if (-not $nsis) { throw 'makensis.exe not found' }
           ./scripts/build-installer.ps1 -MakensisPath $nsis
 
-      - name: Publish release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RShell-windows-x64
+          path: |
+            dist/*-windows-x64-portable.zip
+            dist/*-windows-x64-setup.exe
+            dist/*-windows-x64-*.sha256
+          if-no-files-found: error
+
+  macos:
+    uses: ./.github/workflows/macos.yml
+    with:
+      # Version-only release: user requested reuse of the completed 2.3.20 tests.
+      skip_tests: ${{ github.ref_name == 'v2.3.15' }}
+
+  publish:
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: RShell-*
+          merge-multiple: true
+          path: dist
+      - name: Verify all packages and publish together
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          $base = "dist/RShell-$env:RELEASE_VERSION-windows-x64"
-          $packages = @("$base-portable.zip", "$base-setup.exe")
-          $assets = @()
-          foreach ($package in $packages) {
-            $checksum = "$package.sha256"
-            if (-not (Test-Path -LiteralPath $package) -or -not (Test-Path -LiteralPath $checksum)) {
-              throw "Missing package or checksum: $package"
-            }
-            $expected = ((Get-Content -LiteralPath $checksum -Raw).Trim() -split '\s+')[0]
-            if ((Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash -ne $expected) {
-              throw "Checksum mismatch: $package"
-            }
-            $assets += @($package, $checksum)
-          }
-          gh release create $env:RELEASE_TAG @assets --verify-tag --draft --title "RShell $env:RELEASE_TAG" --generate-notes
-          if ($LASTEXITCODE -ne 0) { throw 'Release creation/upload failed; inspect any remaining draft before retrying' }
-          gh release edit $env:RELEASE_TAG --draft=false
-          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed; the release remains a draft' }
+        run: python3 scripts/publish-release.py
