@@ -69,6 +69,12 @@ Profile 增加 protocol 和 serial 配置，旧配置缺少字段时默认 SSH�
 
 ## XTS 导入与 Telnet
 
-`rshell-core::xts` 在内存读取 ZIP 中的 Xshell UTF-8/UTF-16 会话，只提取白名单配置字段，不执行脚本、不还原主机信任或凭据。文件、条目、文件夹、路径、层级和解压数据均有上限；不把归档成员解压到文件系统。每次导入在配置副本中新建独立根目录，重复导入保留原会话，新增 UUID。`Store::ImportXts` 在串行后台读取并原子保存，成功后才返回 `Outcome::Imported` 和分类统计；失败不发布新配置，也不调用凭据后端。GUI 仅选择路径、提交请求和显示结果。
+`rshell-core::xts` 在内存读取 ZIP 中的 Xshell UTF-8/UTF-16 会话，仅提取白名单字段，不执行脚本或还原主机信任。文件、条目、文件夹、路径、层级和解压数据均有上限；不把归档成员解压到文件系统。每次导入在配置副本中新建独立根目录，保留原会话，新增 UUID。`ImportXtsPasswords` 在后台使用来源用户名/SID或本次输入的主密码解密 SSH 密码；必须通过内嵌 SHA-256 校验才交给凭据后端。未解密时默认返回需要输入状态，整批不写入；用户可显式仅导入配置或允许部分导入。Telnet 密码仍跳过，私钥不迁移。名称修复和旧 `ImportXts` 路径保持只处理配置。
+
+`Store` 的批量凭据提交先写入只含新增 UUID 的 `config.import-journal.json`，再保存凭据及配置。保存失败回滚新增凭据；进程中断后，在下次后台请求前清理未出现在已加载配置中的凭据。已提交 UUID 保留；清理失败会显示错误并保留恢复记录，后续请求重试。密码走现有 `Credentials` 后端，主密码不持久化。
+
+`rsh::secure` 使用独立魔数 `RSHELL-ENCRYPTED-1\0`，Argon2id v0x13（64 MiB、3 次、1 路）派生 AES-256-GCM 密钥。每次导出随机生成 16 字节盐和 12 字节 nonce，文件头作为 AAD；当前版本只接受固定 KDF 参数，避免导入文件诱导过量计算。公开配置 JSON 和按会话顺序绑定的二进制密码字段作为一个整体加密，密码不进入 JSON。输入上限 64 MiB，认证成功后才解析；使用同目录密文临时文件并禁止覆盖目标。旧明文 `.rsh` 保持兼容；`.xts` 导出仍不含密码。RShell 导出不包含文件夹、私钥、API Key、主机信任或 JumpServer 临时凭证。
+
+Xshell 兼容解码为独立 Rust 实现，算法资料参考 [HyperSine](https://github.com/HyperSine/how-does-Xmanager-encrypt-password/blob/master/doc/how-does-Xmanager-encrypt-password.md) 与 [SharpXDecrypt](https://github.com/JDArmy/SharpXDecrypt/blob/main/C%23/XClass.cs)，不打包或执行外部解密程序。当前优先验证 7.1/8.1；其他分支与真实主密码文件不能由合成向量测试推定兼容。Windows 上尝试 UTF-8 及当前系统 ANSI 编码，均须通过摘要校验；跨区域设置的旧 ANSI 凭据仍需实际验收。
 
 `rshell-core::telnet` 复用 `connection` 抽象，使用 Tokio TCP 和有界输入/事件通道（64/16）。连接超时 15 秒，写入超时 10 秒；取消覆盖连接、读写和等待阶段。流式 IAC 状态机支持分片协商、BINARY、服务端 ECHO、SGA、TTYPE、NAWS，子协商限制 1024 字节。NVT 输入回车编码为 CRLF，输出 CR-NUL 去除 NUL，IAC 字节转义；窗口尺寸按 NAWS 协商后发送。远端输出只交给终端解析器，不触发本机文件操作。Telnet 认证由用户在远端提示后输入，不调用 SSH 认证、主机信任或凭据存储；暂不提供本地行编辑/回显模式。

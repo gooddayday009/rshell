@@ -1,5 +1,16 @@
 # 开发状态
 
+## 2.3.16 Xshell 密码导入与 RShell 加密备份（2026-11-08）
+
+- 已实现：XTS 导入优先处理 7.1/8.1 SSH 密码；按来源 Windows 用户信息或主密码解密，校验 SHA-256 后才保存。未解密默认整批不落盘，界面提供主密码重试、来源用户名/SID、仅配置及显式允许部分导入；分别统计成功、失败、不支持版本、跳过及无密码。主密码仅保留在本次任务内存中，密码走现有受保护凭据后端。
+- 已实现：`.rsh` 导出可选包含已保存登录密码，必须设置并确认导出口令；Argon2id + AES-256-GCM 整体加密配置和二进制凭据字段。导入自动索取口令，认证成功后生成新 UUID 并重新保存凭据；旧 `.rsh` 兼容。保存失败回滚新增凭据，中断后通过只含 UUID 的恢复记录清理孤立项。`.xts` 导出仍不包含密码，私钥及其口令不在本阶段迁移范围。
+- 已验证：`RUST_TEST_THREADS=1` 下 `scripts/test.ps1` 的格式检查、严格 Clippy、278 项常规测试通过，6 项专项默认忽略，日志 `target/password-import/checks-complete.log`。新增测试覆盖合成 7.1/8.1、公开主密码向量、中文密码、错误口令、篡改、截断、异常 KDF 参数、凭据失败回滚与中断恢复。默认并发回归曾遇到既有下载中断清理和历史行数 GUI 时序测试失败，未改动或跳过这两项测试；串行全量通过。
+- 已验证：按 `scripts/test.ps1 -WithCredentials` 执行凭据专项；CLI 已保存凭据和 DPAPI 往返通过。沙箱内 Windows Credential Manager 写入受限，JumpServer 凭据与已保存密码/MFA 两项在正常用户环境复核通过；日志分别为 `checks-serial.log`、`credentials-native.log`、`saved-password-auth-native.log`（均在 `target/password-import/`）。
+- 已验证：用户指定本机 XTS 只读扫描识别 121 个可导入会话、101 个待主密码解密的密码；原包 123 个会话文件另有 1 个串口、1 个连接参数无效。没有真实密码解密或正式配置写入，日志 `target/password-import/sample-check.log`。
+- 已验证：5 个定向原生窗口场景通过并人工检查截图，包括 XTS 主密码深色/浅色窄窗口、高级来源信息展开、`.rsh` 加密导出/导入。输入区可滚动，主要操作固定在下方；产物在 `target/password-import/`，不是整套 Smoke 或真实文件选择器交互验收。
+- 2.3.16 发布检查：版本号更新后，`RUST_TEST_THREADS=1` 下 `scripts/test.ps1 -Smoke` 通过 278 项常规测试及全部 24 个窗口场景，日志 `target/password-import/release-2.3.16-checks.log`。标签将触发 Windows/macOS 云端构建；本机通过不代表云端构建或正式发布完成。
+- 待完成：用户在 RShell 弹窗输入真实主密码后的样本解密验收、跨 Windows 用户/电脑的加密备份恢复、真实服务器登录；旧版本与跨区域 ANSI 密码兼容性需单独验证。开发版已构建，未打包发布。
+
 ## macOS 2.3.20（2026-11-06）
 
 - 已提交并推送平台适配和两处跨平台测试修复，构建源码 `ba16f823c787ef7d5b844ed03e1f058a6bc73c0a`。

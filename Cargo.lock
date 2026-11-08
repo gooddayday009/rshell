@@ -185,6 +185,7 @@ dependencies = [
  "blake2",
  "cpufeatures",
  "password-hash",
+ "zeroize",
 ]
 
 [[package]]
@@ -2978,6 +2979,7 @@ version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aab41826031698d6ffcd9cff78ef56ef998e39dc7e5067cdfebe373842d4723b"
 dependencies = [
+ "getrandom 0.4.3",
  "phc",
 ]
 
@@ -3027,6 +3029,7 @@ checksum = "44dc769b75f93afdddd8c7fa12d685292ddeff1e66f7f0f3a234cf1818afe892"
 dependencies = [
  "base64ct",
  "ctutils",
+ "getrandom 0.4.3",
 ]
 
 [[package]]
@@ -3685,7 +3688,7 @@ dependencies = [
 
 [[package]]
 name = "rshell"
-version = "2.3.15"
+version = "2.3.16"
 dependencies = [
  "anyhow",
  "directories",
@@ -3708,9 +3711,12 @@ dependencies = [
 
 [[package]]
 name = "rshell-core"
-version = "2.3.15"
+version = "2.3.16"
 dependencies = [
+ "aes-gcm",
  "anyhow",
+ "argon2",
+ "base64",
  "encoding_rs",
  "portable-pty",
  "rand",
@@ -3737,7 +3743,7 @@ dependencies = [
 
 [[package]]
 name = "rshell-terminal"
-version = "2.3.15"
+version = "2.3.16"
 dependencies = [
  "alacritty_terminal",
 ]

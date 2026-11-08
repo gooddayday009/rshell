@@ -1,3 +1,5 @@
+#[path = "session_transfer.rs"]
+mod session_transfer;
 #[path = "split_view.rs"]
 mod split_view;
 use split_view::{PaneGroups, terminal_panes};
@@ -739,6 +741,9 @@ pub struct App {
     session_file_picker: Option<std::sync::mpsc::Receiver<Option<SessionFilePick>>>,
     import_open: bool,
     import_path: String,
+    transfer_dialog: Option<session_transfer::Dialog>,
+    xts_password: rshell_core::xts::PasswordOptions,
+    xts_needs_password: bool,
     import_result: String,
     import_picker: Option<std::sync::mpsc::Receiver<Option<PathBuf>>>,
     rename: Option<(Uuid, String)>,
@@ -865,7 +870,13 @@ impl Drop for App {
 
 impl App {
     fn choose_session_file(&mut self, ctx: &egui::Context, export: Option<bool>) {
-        if self.session_file_picker.is_some() {
+        if self.session_file_picker.is_some()
+            || self.transfer_dialog.is_some()
+            || self
+                .pending
+                .values()
+                .any(|p| matches!(p, Pending::SessionFile))
+        {
             return;
         }
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
@@ -906,7 +917,10 @@ impl App {
                 if let Some(pick) = pick {
                     let action = match pick {
                         SessionFilePick::Import(path) => Action::ImportRsh(path),
-                        SessionFilePick::ExportRsh(path) => Action::ExportRsh { path },
+                        SessionFilePick::ExportRsh(path) => {
+                            self.transfer_dialog = Some(session_transfer::Dialog::export(path));
+                            return;
+                        }
                         SessionFilePick::ExportXts(path) => Action::ExportXts { path },
                     };
                     self.submit(action, Pending::SessionFile);
@@ -1030,6 +1044,9 @@ impl App {
                 Ok(path) => {
                     if let Some(path) = path {
                         self.import_path = path.to_string_lossy().into_owned();
+                        self.xts_password = Default::default();
+                        self.xts_needs_password = false;
+                        self.import_result.clear();
                     }
                     self.import_picker = None;
                 }
@@ -1048,13 +1065,16 @@ impl App {
             .open(&mut open).collapsible(false).default_width(580.0)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ctx, |ui| {
+                egui::ScrollArea::vertical().max_height((ctx.content_rect().height() - 290.0).max(150.0)).show(ui, |ui| {
                 ui.label("导入 SSH / Telnet 配置与文件夹；新建独立导入目录，不覆盖现有会话。");
-                ui.label("不导入密码、私钥、脚本、代理、转发或主机信任。SSH 缺少用户名时需补填。Telnet 使用明文传输，登录信息在终端输入。");
+                ui.label("自动导入可校验的 SSH 密码；需要主密码时提示输入。不导入私钥、脚本、代理、转发或主机信任。Telnet 登录信息仍在终端输入。");
                 ui.label("串口枚举参数尚不兼容，将跳过并计数。仅支持 UTF-8 / UTF-16 会话。");
                 ui.label("文件名支持 UTF-8 / GBK。已有中文乱码：选择原 XTS 后点「修复已导入名称」，无需重复导入。");
                 ui.add_enabled_ui(!busy && self.import_picker.is_none(), |ui| {
                     ui.horizontal(|ui| {
-                        ui.add(egui::TextEdit::singleline(&mut self.import_path).desired_width(420.0).hint_text("Xshell 导出的 .xts 文件路径"));
+                        if ui.add(egui::TextEdit::singleline(&mut self.import_path).desired_width(420.0).hint_text("Xshell 导出的 .xts 文件路径")).changed() {
+                            self.xts_password = Default::default(); self.xts_needs_password = false; self.import_result.clear();
+                        }
                         if ui.button("浏览…").clicked() {
                             let (tx, rx) = std::sync::mpsc::sync_channel(1);
                             let notify = ctx.clone();
@@ -1065,23 +1085,56 @@ impl App {
                             self.import_picker = Some(rx);
                         }
                     });
-                    import = ui.add_enabled(!self.import_path.trim().is_empty(), egui::Button::new("导入配置和文件夹")).clicked();
+                    if self.xts_needs_password {
+                        ui.label("Xshell 主密码（仅用于本次导入）");
+                        ui.add(egui::TextEdit::singleline(&mut *self.xts_password.master).password(true).char_limit(16384));
+                        egui::CollapsingHeader::new("来源 Windows 用户信息（无主密码、跨用户导入时使用）")
+                            .default_open(self.smoke && std::env::args().any(|a| a == "--smoke-import-advanced"))
+                            .show(ui, |ui| {
+                            ui.label("用户名（区分大小写）");
+                            ui.add(egui::TextEdit::singleline(&mut self.xts_password.username).char_limit(256));
+                            ui.label("SID");
+                            ui.add(egui::TextEdit::singleline(&mut self.xts_password.sid).char_limit(256));
+                        });
+                        ui.checkbox(&mut self.xts_password.allow_partial, "允许部分导入：未解密的密码跳过，仅保留对应配置");
+                    }
+                });
+                });
+                ui.separator();
+                ui.add_enabled_ui(!busy && self.import_picker.is_none(), |ui| {
+                    import = ui.add_enabled(!self.import_path.trim().is_empty(), egui::Button::new(if self.xts_needs_password { "重试导入（校验密码）" } else { "导入配置、文件夹和密码" })).clicked();
+                    if ui.add_enabled(!self.import_path.trim().is_empty(), egui::Button::new("仅导入配置和文件夹")).clicked() {
+                        self.xts_password.config_only = true; import = true;
+                    }
                     repair = ui.add_enabled(!self.import_path.trim().is_empty(), egui::Button::new("修复已导入名称（不新增会话）")).clicked();
                 });
                 if busy { ui.spinner(); ui.label("正在后台导入并保存…"); }
                 if !self.import_result.is_empty() { ui.separator(); ui.label(&self.import_result); }
             });
         self.import_open = open;
+        if !open {
+            self.xts_password = Default::default();
+            self.xts_needs_password = false;
+        }
         if import || repair {
             self.import_result.clear();
-            self.submit(
-                if repair {
-                    Action::RepairXtsNames(PathBuf::from(self.import_path.trim()))
-                } else {
-                    Action::ImportXts(PathBuf::from(self.import_path.trim()))
-                },
-                Pending::Import,
-            );
+            let action = if repair {
+                Action::RepairXtsNames(PathBuf::from(self.import_path.trim()))
+            } else {
+                let options = rshell_core::xts::PasswordOptions {
+                    master: std::mem::take(&mut self.xts_password.master),
+                    username: self.xts_password.username.clone(),
+                    sid: self.xts_password.sid.clone(),
+                    config_only: self.xts_password.config_only,
+                    allow_partial: self.xts_password.allow_partial,
+                };
+                self.xts_password.config_only = false;
+                Action::ImportXtsPasswords {
+                    path: PathBuf::from(self.import_path.trim()),
+                    options,
+                }
+            };
+            self.submit(action, Pending::Import);
         }
     }
 
@@ -1132,6 +1185,9 @@ impl App {
             session_file_picker: None,
             import_open: smoke && std::env::args().any(|a| a == "--smoke-import"),
             import_path: String::new(),
+            transfer_dialog: None,
+            xts_password: Default::default(),
+            xts_needs_password: false,
             import_result: String::new(),
             import_picker: None,
             rename: None,
@@ -1239,6 +1295,20 @@ impl App {
                 .as_bytes(),
             );
             app.tabs.push(tab);
+        }
+        if smoke && std::env::args().any(|a| a == "--smoke-import-password") {
+            app.import_open = true;
+            app.xts_needs_password = true;
+            app.import_path = "sessions.xts".into();
+            app.import_result = "尚未写入任何会话。请输入主密码；也可仅导入配置。".into();
+        }
+        if smoke && std::env::args().any(|a| a == "--smoke-rsh-export") {
+            app.transfer_dialog = Some(session_transfer::Dialog::smoke_export());
+        }
+        if smoke && std::env::args().any(|a| a == "--smoke-rsh-import") {
+            app.transfer_dialog = Some(session_transfer::Dialog::import(PathBuf::from(
+                "sessions.rsh",
+            )));
         }
         if smoke && std::env::args().any(|a| a == "--smoke-terminal-search") {
             if let Some(tab) = app.tabs.get_mut(app.active) {
@@ -1660,13 +1730,27 @@ impl App {
                 continue;
             }
             match completion.result {
+                Ok(Outcome::RshPasswordRequired(path)) => {
+                    self.transfer_dialog = Some(session_transfer::Dialog::import(path));
+                }
+                Ok(Outcome::XtsPasswordRequired(report)) => {
+                    self.xts_needs_password = true;
+                    self.xts_password.master = Default::default();
+                    self.import_result = format!(
+                        "尚未写入任何会话。可解密 {} 个，未解密 {} 个，不支持的密码版本 {} 个。请输入主密码或补充来源用户信息重试；也可仅导入配置。",
+                        report.passwords, report.password_failed, report.password_unsupported
+                    );
+                    self.import_open = true;
+                }
                 Ok(Outcome::ImportedRsh(config, name)) => {
                     self.config = config;
                     self.show_sessions = true;
                     self.filter.clear();
-                    self.message = format!("已导入会话「{name}」；凭据和主机信任需重新确认");
+                    self.transfer_dialog = None;
+                    self.message = format!("已导入 {name}；主机信任需重新确认");
                 }
                 Ok(Outcome::ExportedRsh(path) | Outcome::ExportedXts(path)) => {
+                    self.transfer_dialog = None;
                     self.message = format!("会话已导出：{}", path.display());
                 }
                 Ok(Outcome::RepairedNames(config, report)) => {
@@ -1676,6 +1760,8 @@ impl App {
                     self.import_open = true;
                 }
                 Ok(Outcome::Imported(config, report)) => {
+                    self.xts_password = Default::default();
+                    self.xts_needs_password = false;
                     self.config = config;
                     self.import_result = report.summary();
                     self.message = self.import_result.clone();
@@ -2868,6 +2954,7 @@ impl eframe::App for App {
         self.jumpserver_dialog(&ctx);
         clear_selection_on_primary_click(&ctx, self.tabs.get_mut(self.active));
         self.import_dialog(&ctx);
+        self.session_transfer_dialog(&ctx);
         if !self.screenshot_requested && self.started.elapsed() > Duration::from_secs(4) {
             if let Some(path) = std::env::var_os("RSHELL_SCREENSHOT") {
                 ctx.request_screenshot(move |image| {

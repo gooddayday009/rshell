@@ -11,6 +11,7 @@ pub mod session_tree;
 pub mod ssh;
 pub mod store;
 pub mod telnet;
+mod xshell_password;
 pub mod xts;
 
 pub mod connection;

@@ -1,4 +1,6 @@
-//! RShell's portable session file. Only the listed public settings cross the boundary.
+#[path = "rsh_secure.rs"]
+pub mod secure;
+// RShell's portable session file. Only the listed public settings cross the boundary.
 use crate::config::{AuthMethod, KeepAlive, Profile, Protocol, SerialSettings};
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};

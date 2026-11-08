@@ -7,6 +7,9 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 sha2 = "0.11"
+base64 = "0.22"
+aes-gcm = { version = "0.11", features = ["zeroize"] }
+argon2 = { version = "0.6", features = ["zeroize"] }
 tempfile = "3"
 tokio.workspace = true
 serde.workspace = true
@@ -26,7 +29,7 @@ time = { version = "0.3", features = ["parsing"] }
 reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls", "cookies"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_Security_Credentials", "Win32_System_JobObjects", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Globalization", "Win32_Security_Cryptography", "Win32_Security_Credentials", "Win32_Security_Authorization", "Win32_System_WindowsProgramming", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 [dev-dependencies]
 rshell-terminal = { path = "../rshell-terminal" }

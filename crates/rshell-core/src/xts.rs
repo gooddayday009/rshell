@@ -1,5 +1,6 @@
 //! Bounded, in-memory import. Archive members are never extracted or executed.
 use crate::config::{Config, Folder, Profile, Protocol};
+pub use crate::xshell_password::Options as PasswordOptions;
 use anyhow::{Context, Result, bail, ensure};
 use std::{
     collections::HashMap,
@@ -9,6 +10,7 @@ use std::{
 };
 use uuid::Uuid;
 use zeroize::Zeroizing;
+pub type Secrets = Vec<(Uuid, Zeroizing<String>)>;
 use zip::read::HasZipMetadata;
 
 const MAX_ENTRY: u64 = 1024 * 1024;
@@ -118,26 +120,68 @@ pub struct Report {
     pub invalid: usize,
     pub missing_username: usize,
     pub folders: usize,
+    pub passwords: usize,
+    pub password_absent: usize,
+    pub password_failed: usize,
+    pub password_unsupported: usize,
+    pub password_skipped: usize,
 }
 
 impl Report {
     pub fn summary(&self) -> String {
         format!(
-            "导入完成：SSH {}，Telnet {}，文件夹 {}。跳过：串口参数暂不兼容 {}，其他协议 {}，无效会话 {}。SSH 用户名待补 {}。密码需重新输入；私钥需重新选择。",
+            "导入完成：SSH {}，Telnet {}，文件夹 {}。跳过：串口参数暂不兼容 {}，其他协议 {}，无效会话 {}。SSH 用户名待补 {}。密码成功 {}，未解密 {}，未导入 {}，未保存密码 {}，不支持的密码版本 {}。私钥需重新选择。",
             self.ssh,
             self.telnet,
             self.folders,
             self.serial_skipped,
             self.unsupported,
             self.invalid,
-            self.missing_username
+            self.missing_username,
+            self.passwords,
+            self.password_failed,
+            self.password_skipped,
+            self.password_absent,
+            self.password_unsupported
         )
     }
 }
 
 /// Returns a new configuration so parsing failures never modify the caller's state.
 pub fn import(path: &Path, current: &Config) -> Result<(Config, Report)> {
-    import_with_names(path, current, false)
+    let (config, report, _) = parse(
+        path,
+        current,
+        false,
+        &PasswordOptions {
+            config_only: true,
+            ..Default::default()
+        },
+    )?;
+    Ok((config, report))
+}
+
+pub fn import_passwords(
+    path: &Path,
+    current: &Config,
+    options: &mut PasswordOptions,
+) -> Result<(Config, Report, Secrets)> {
+    ensure!(
+        options.master.len() <= 16384
+            && options.username.len() <= 1024
+            && options.sid.len() <= 1024,
+        "主密码或来源用户信息过长"
+    );
+    if !options.config_only
+        && options.master.is_empty()
+        && options.username.is_empty()
+        && options.sid.is_empty()
+        && let Some((username, sid)) = crate::xshell_password::current_identity()
+    {
+        options.username = username;
+        options.sid = sid;
+    }
+    parse(path, current, false, options)
 }
 
 fn import_with_names(
@@ -145,6 +189,25 @@ fn import_with_names(
     current: &Config,
     legacy_names: bool,
 ) -> Result<(Config, Report)> {
+    let (config, report, _) = parse(
+        path,
+        current,
+        legacy_names,
+        &PasswordOptions {
+            config_only: true,
+            ..Default::default()
+        },
+    )?;
+    Ok((config, report))
+}
+
+fn parse(
+    path: &Path,
+    current: &Config,
+    legacy_names: bool,
+    options: &PasswordOptions,
+) -> Result<(Config, Report, Secrets)> {
+    let mut secrets = Vec::new();
     let file = File::open(path).context("无法打开 XTS 文件")?;
     ensure!(
         file.metadata()?.len() <= 64 * 1024 * 1024,
@@ -288,7 +351,7 @@ fn import_with_names(
         }
         let filename = parts.last().unwrap();
         let username = get("CONNECTION:AUTHENTICATION", "UserName");
-        let profile = Profile {
+        let mut profile = Profile {
             protocol,
             name: filename[..filename.len() - 4].into(),
             folder_id: Some(parent),
@@ -309,6 +372,29 @@ fn import_with_names(
         } else {
             report.telnet += 1;
         }
+        let encrypted = get("CONNECTION:AUTHENTICATION", "Password");
+        if !encrypted.is_empty() {
+            if options.config_only || protocol != Protocol::Ssh {
+                report.password_skipped += 1;
+            } else if !crate::xshell_password::supported(get("SessionInfo", "Version")) {
+                report.password_unsupported += 1;
+            } else {
+                match crate::xshell_password::decrypt(
+                    get("SessionInfo", "Version"),
+                    encrypted,
+                    options,
+                ) {
+                    Ok(password) => {
+                        profile.remember_secret = true;
+                        secrets.push((profile.id, password));
+                        report.passwords += 1;
+                    }
+                    Err(_) => report.password_failed += 1,
+                }
+            }
+        } else {
+            report.password_absent += 1;
+        }
         config.profiles.push(profile);
     }
     ensure!(
@@ -317,7 +403,7 @@ fn import_with_names(
     );
     report.folders = config.folders.len() - current.folders.len();
     config.validate_folders()?;
-    Ok((config, report))
+    Ok((config, report, secrets))
 }
 
 // Xshell on Chinese Windows writes ANSI/GBK paths without ZIP's UTF-8 bit.
@@ -479,7 +565,9 @@ fn fields(text: &str) -> HashMap<(&str, &str), &str> {
         } else if let Some((key, value)) = line.split_once('=') {
             let key = key.trim();
             if (section == "CONNECTION" && matches!(key, "Protocol" | "Host" | "Port"))
-                || (section == "CONNECTION:AUTHENTICATION" && key == "UserName")
+                || (section == "CONNECTION:AUTHENTICATION"
+                    && matches!(key, "UserName" | "Password"))
+                || (section == "SessionInfo" && key == "Version")
             {
                 result.insert((section, key), value.trim());
             }
@@ -889,4 +977,24 @@ fn exported_ssh_and_telnet_import_back_without_secrets() {
         assert_eq!(report.ssh + report.telnet, 1);
         assert!(export(&path, &profile).is_err());
     }
+}
+#[test]
+#[ignore = "requires an explicitly selected local XTS; never prints session details or passwords"]
+fn inspect_real_xts_passwords_without_persistence() {
+    let path = std::env::var_os("RSHELL_TEST_XTS").expect("set RSHELL_TEST_XTS");
+    let (config, report, secrets) = import_passwords(
+        Path::new(&path),
+        &Config::default(),
+        &mut PasswordOptions::default(),
+    )
+    .unwrap();
+    assert!(!config.profiles.is_empty());
+    assert_eq!(report.passwords, secrets.len());
+    println!(
+        "sessions={}, passwords_verified={}, passwords_need_input={}, passwords_skipped={}",
+        config.profiles.len(),
+        report.passwords,
+        report.password_failed,
+        report.password_skipped
+    );
 }

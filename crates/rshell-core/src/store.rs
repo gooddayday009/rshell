@@ -21,6 +21,18 @@ pub enum Action {
         token: Option<Zeroizing<String>>,
     },
     ImportRsh(PathBuf),
+    ImportEncryptedRsh {
+        path: PathBuf,
+        password: Zeroizing<String>,
+    },
+    ExportEncryptedRsh {
+        path: PathBuf,
+        password: Zeroizing<String>,
+    },
+    ImportXtsPasswords {
+        path: PathBuf,
+        options: crate::xts::PasswordOptions,
+    },
     ExportRsh {
         path: PathBuf,
     },
@@ -100,6 +112,8 @@ pub enum Action {
 }
 
 pub enum Outcome {
+    RshPasswordRequired(PathBuf),
+    XtsPasswordRequired(crate::xts::Report),
     ImportedRsh(Config, String),
     ExportedRsh(PathBuf),
     ExportedXts(PathBuf),
@@ -215,6 +229,7 @@ struct State<C> {
 }
 impl<C: Credentials> State<C> {
     fn apply(&mut self, action: Action) -> Result<Outcome> {
+        self.recover_import()?;
         let mut candidate = self.config.clone();
         match action {
             Action::SaveJumpServer(saved) => {
@@ -241,12 +256,50 @@ impl<C: Credentials> State<C> {
                 return Ok(Outcome::JumpServerTokenSaved);
             }
             Action::ImportRsh(path) => {
+                if crate::rsh::secure::is_encrypted(&path)? {
+                    return Ok(Outcome::RshPasswordRequired(path));
+                }
                 let profiles = crate::rsh::import_all(&path)?;
                 let name = format!("{} 个会话", profiles.len());
                 candidate.profiles.extend(profiles);
                 candidate.save(&self.path)?;
                 self.config = candidate;
                 return Ok(Outcome::ImportedRsh(self.config.clone(), name));
+            }
+            Action::ImportEncryptedRsh { path, password } => {
+                let (profiles, secrets) = crate::rsh::secure::import(&path, &password)?;
+                let name = format!("{} 个会话，{} 个密码", profiles.len(), secrets.len());
+                candidate.profiles.extend(profiles);
+                self.commit_import(candidate, &secrets)?;
+                return Ok(Outcome::ImportedRsh(self.config.clone(), name));
+            }
+            Action::ExportEncryptedRsh { path, password } => {
+                let mut secrets = Vec::new();
+                for profile in &self.config.profiles {
+                    if profile.remember_secret
+                        && profile.protocol == crate::config::Protocol::Ssh
+                        && profile.auth == crate::config::AuthMethod::Password
+                    {
+                        let secret = self
+                            .credentials
+                            .read(profile.id)?
+                            .context("已保存的会话密码不可用，导出已取消")?;
+                        secrets.push((profile.id, secret));
+                    }
+                }
+                crate::rsh::secure::export(&path, &self.config.profiles, &secrets, &password)?;
+                return Ok(Outcome::ExportedRsh(path));
+            }
+            Action::ImportXtsPasswords { path, mut options } => {
+                let (config, report, secrets) =
+                    crate::xts::import_passwords(&path, &self.config, &mut options)?;
+                if report.password_failed + report.password_unsupported > 0
+                    && !options.allow_partial
+                {
+                    return Ok(Outcome::XtsPasswordRequired(report));
+                }
+                self.commit_import(config, &secrets)?;
+                return Ok(Outcome::Imported(self.config.clone(), report));
             }
             Action::ExportRsh { path } => {
                 crate::rsh::export_all(&path, &self.config.profiles)?;
@@ -649,6 +702,76 @@ impl<C: Credentials> State<C> {
         candidate.save(&self.path)?;
         self.config = candidate;
         Ok(Outcome::Committed(self.config.clone()))
+    }
+
+    // The journal contains only new UUIDs, never secrets. If the process stops
+    // before config commit, the next worker request removes orphan credentials.
+    fn recover_import(&mut self) -> Result<()> {
+        let path = self.path.with_extension("import-journal.json");
+        let file = match std::fs::File::open(&path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e).context("无法读取导入恢复记录"),
+        };
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        file.take(256 * 1024 + 1).read_to_end(&mut bytes)?;
+        anyhow::ensure!(bytes.len() <= 256 * 1024, "导入恢复记录过大");
+        let ids: Vec<Uuid> = serde_json::from_slice(&bytes).context("导入恢复记录无效")?;
+        anyhow::ensure!(ids.len() <= 4096, "导入恢复记录过大");
+        for id in ids {
+            if !self.config.profiles.iter().any(|p| p.id == id)
+                && !self.config.ai.profiles.iter().any(|p| p.id == id)
+            {
+                self.credentials
+                    .delete(id)
+                    .context("清理未提交的导入凭据失败，请重试")?;
+            }
+        }
+        std::fs::remove_file(path).context("清理导入恢复记录失败")?;
+        Ok(())
+    }
+
+    fn commit_import(&mut self, candidate: Config, secrets: &crate::xts::Secrets) -> Result<()> {
+        if secrets.is_empty() {
+            candidate.save(&self.path)?;
+            self.config = candidate;
+            return Ok(());
+        }
+        let ids: Vec<_> = secrets.iter().map(|(id, _)| *id).collect();
+        for id in &ids {
+            anyhow::ensure!(
+                !self.config.profiles.iter().any(|p| p.id == *id)
+                    && !self.config.ai.profiles.iter().any(|p| p.id == *id)
+                    && self.credentials.read(*id)?.is_none(),
+                "导入凭据标识冲突"
+            );
+        }
+        let journal = self.path.with_extension("import-journal.json");
+        let parent = journal.parent().context("配置目录无效")?;
+        std::fs::create_dir_all(parent)?;
+        let mut file = tempfile::NamedTempFile::new_in(parent)?;
+        use std::io::Write;
+        file.write_all(&serde_json::to_vec(&ids)?)?;
+        file.as_file().sync_all()?;
+        file.persist_noclobber(&journal)
+            .map_err(|_| anyhow::anyhow!("无法保存导入恢复记录"))?;
+        let result = (|| -> Result<()> {
+            for (id, secret) in secrets {
+                self.credentials.write(*id, secret)?;
+            }
+            candidate.save(&self.path)?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            self.recover_import()
+                .context("导入失败，凭据回滚未完成；下次操作将重试清理")?;
+            return Err(error).context("导入失败，新增凭据已回滚");
+        }
+        self.config = candidate;
+        // A retained journal is harmless after commit and is cleaned next time.
+        let _ = std::fs::remove_file(journal);
+        Ok(())
     }
 
     fn commit_credential(
@@ -1552,5 +1675,230 @@ mod tests {
         invalid.scrollback_lines = usize::MAX;
         invalid.save(&state.path).unwrap();
         assert!(Config::load(&state.path).is_err());
+    }
+    fn password_xts(path: &std::path::Path) {
+        use std::io::Write;
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+        for (index, version) in ["7.1", "8.1"].iter().enumerate() {
+            zip.start_file(
+                format!("Xshell/test-{index}.xsh"),
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+            write!(zip, "[SessionInfo]\nVersion={version}\n[CONNECTION]\nProtocol=SSH\nHost=localhost\nPort=22\n[CONNECTION:AUTHENTICATION]\nUserName=test\nPassword=Rrm3P3AL0iDV7nBbS2bHvh7ZAvuN1NSJl8ZFL11+UJ+82+KAixa89O3OTAfRTg==").unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
+    #[test]
+    fn master_import_requires_retry_and_commits_credentials_without_plaintext_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.xts");
+        password_xts(&path);
+        let mut state = State {
+            path: dir.path().join("config.json"),
+            config: Config::default(),
+            credentials: FakeCredentials::default(),
+        };
+        let outcome = state
+            .apply(Action::ImportXtsPasswords {
+                path: path.clone(),
+                options: Default::default(),
+            })
+            .unwrap();
+        assert!(matches!(outcome, Outcome::XtsPasswordRequired(ref r) if r.password_failed == 2));
+        assert!(!state.path.exists());
+        assert!(state.credentials.0.lock().unwrap().is_empty());
+        let outcome = state
+            .apply(Action::ImportXtsPasswords {
+                path: path.clone(),
+                options: crate::xts::PasswordOptions {
+                    master: Zeroizing::new("123123".into()),
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+        assert!(matches!(outcome, Outcome::Imported(_, ref r) if r.passwords == 2));
+        assert_eq!(state.credentials.0.lock().unwrap().len(), 2);
+        assert!(state.config.profiles.iter().all(|p| p.remember_secret));
+        assert!(
+            !std::fs::read_to_string(&state.path)
+                .unwrap()
+                .contains("This is a test")
+        );
+        assert!(!state.path.with_extension("import-journal.json").exists());
+        state
+            .apply(Action::ImportXtsPasswords {
+                path,
+                options: crate::xts::PasswordOptions {
+                    config_only: true,
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+        assert_eq!(state.config.profiles.len(), 4);
+        assert_eq!(state.credentials.0.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn import_credentials_roll_back_on_config_failure_and_recover_after_interruption() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = State {
+            path: dir.path().join("blocked.json"),
+            config: Config::default(),
+            credentials: FakeCredentials::default(),
+        };
+        std::fs::create_dir(&state.path).unwrap();
+        let mut candidate = state.config.clone();
+        let p = valid_profile();
+        let id = p.id;
+        candidate.profiles.push(p);
+        assert!(
+            state
+                .commit_import(candidate, &vec![(id, Zeroizing::new("test secret".into()))])
+                .is_err()
+        );
+        assert!(state.credentials.0.lock().unwrap().is_empty());
+        assert!(state.config.profiles.is_empty());
+        state.path = dir.path().join("config.json");
+        let committed = valid_profile();
+        let committed_id = committed.id;
+        state.config.profiles.push(committed);
+        state.credentials.write(committed_id, "keep").unwrap();
+        state.credentials.write(id, "orphan").unwrap();
+        std::fs::write(
+            state.path.with_extension("import-journal.json"),
+            serde_json::to_vec(&vec![id, committed_id]).unwrap(),
+        )
+        .unwrap();
+        state.recover_import().unwrap();
+        assert!(state.credentials.read(id).unwrap().is_none());
+        assert!(state.credentials.read(committed_id).unwrap().is_some());
+    }
+
+    #[test]
+    fn encrypted_store_roundtrip_and_missing_credentials_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("backup.rsh");
+        let mut state = State {
+            path: dir.path().join("config.json"),
+            config: Config::default(),
+            credentials: FakeCredentials::default(),
+        };
+        let p = valid_profile();
+        let id = p.id;
+        state.config.profiles.push(p);
+        assert!(
+            state
+                .apply(Action::ExportEncryptedRsh {
+                    path: path.clone(),
+                    password: Zeroizing::new("backup password".into())
+                })
+                .is_err()
+        );
+        assert!(!path.exists());
+        state.credentials.write(id, "saved password").unwrap();
+        state
+            .apply(Action::ExportEncryptedRsh {
+                path: path.clone(),
+                password: Zeroizing::new("backup password".into()),
+            })
+            .unwrap();
+        assert!(matches!(
+            state.apply(Action::ImportRsh(path.clone())).unwrap(),
+            Outcome::RshPasswordRequired(_)
+        ));
+        assert!(
+            state
+                .apply(Action::ImportEncryptedRsh {
+                    path: path.clone(),
+                    password: Zeroizing::new("wrong".into())
+                })
+                .is_err()
+        );
+        assert_eq!(state.config.profiles.len(), 1);
+        state
+            .apply(Action::ImportEncryptedRsh {
+                path,
+                password: Zeroizing::new("backup password".into()),
+            })
+            .unwrap();
+        assert_eq!(state.config.profiles.len(), 2);
+        assert_eq!(state.credentials.0.lock().unwrap().len(), 2);
+        let new_id = state.config.profiles[1].id;
+        assert_ne!(id, new_id);
+        assert!(state.credentials.read(new_id).unwrap().unwrap().as_str() == "saved password");
+    }
+    #[test]
+    fn credential_write_failure_removes_even_the_failed_entry() {
+        struct Failing {
+            inner: FakeCredentials,
+            writes: usize,
+        }
+        impl Credentials for Failing {
+            fn read(&mut self, id: Uuid) -> Result<Option<Zeroizing<String>>> {
+                self.inner.read(id)
+            }
+            fn write(&mut self, id: Uuid, value: &str) -> Result<()> {
+                self.inner.write(id, value)?;
+                self.writes += 1;
+                if self.writes == 2 {
+                    bail!("simulated credential failure");
+                }
+                Ok(())
+            }
+            fn delete(&mut self, id: Uuid) -> Result<()> {
+                self.inner.delete(id)
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = State {
+            path: dir.path().join("config.json"),
+            config: Config::default(),
+            credentials: Failing {
+                inner: FakeCredentials::default(),
+                writes: 0,
+            },
+        };
+        let a = valid_profile();
+        let b = valid_profile();
+        let secrets = vec![
+            (a.id, Zeroizing::new("a".into())),
+            (b.id, Zeroizing::new("b".into())),
+        ];
+        let mut candidate = state.config.clone();
+        candidate.profiles.extend([a, b]);
+        assert!(state.commit_import(candidate, &secrets).is_err());
+        assert!(state.credentials.inner.0.lock().unwrap().is_empty());
+        assert!(!state.path.exists());
+        assert!(!state.path.with_extension("import-journal.json").exists());
+    }
+
+    #[test]
+    fn partial_import_requires_explicit_choice() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.xts");
+        password_xts(&path);
+        let mut state = State {
+            path: dir.path().join("config.json"),
+            config: Config::default(),
+            credentials: FakeCredentials::default(),
+        };
+        let result = state
+            .apply(Action::ImportXtsPasswords {
+                path,
+                options: crate::xts::PasswordOptions {
+                    master: Zeroizing::new("wrong".into()),
+                    allow_partial: true,
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+        assert!(
+            matches!(result,Outcome::Imported(_,ref r) if r.password_failed==2 && r.passwords==0)
+        );
+        assert_eq!(state.config.profiles.len(), 2);
+        assert!(state.config.profiles.iter().all(|p| !p.remember_secret));
+        assert!(state.credentials.0.lock().unwrap().is_empty());
     }
 }
