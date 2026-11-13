@@ -7,6 +7,7 @@ pub enum Command {
 }
 
 pub enum Event {
+    OpenSsh(crate::shell_bridge::SshTarget),
     Status(String),
     Tunnels(Vec<String>),
     HostKey {

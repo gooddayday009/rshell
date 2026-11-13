@@ -11,6 +11,9 @@
 !ifndef SOURCE_CLI
   !error "SOURCE_CLI is required"
 !endif
+!ifndef SOURCE_SHELL
+  !error "SOURCE_SHELL is required"
+!endif
 !ifndef OUTPUT_DIR
   !error "OUTPUT_DIR is required"
 !endif
@@ -69,6 +72,7 @@ Section "RShell" Main
   SetOutPath "$INSTDIR"
   File /oname=rshell.exe "${SOURCE_EXE}"
   File /oname=rshell-cli.exe "${SOURCE_CLI}"
+  File /oname=rshell-shell.exe "${SOURCE_SHELL}"
 !ifdef AGENT_SDK_DIR
   SetOutPath "$INSTDIR\agent-sdk"
   File /r "${AGENT_SDK_DIR}\*"
@@ -87,6 +91,7 @@ Section "RShell" Main
   SetOutPath "$INSTDIR\licenses"
   File /oname=Geist-OFL.txt "${PROJECT_ROOT}\crates\rshell-app\assets\fonts\LICENSE.txt"
   File /oname=Lucide.txt "${PROJECT_ROOT}\crates\rshell-app\assets\lucide\LICENSE"
+  File "${PROJECT_ROOT}\crates\rshell-app\assets\licenses\rubash-MIT.txt"
   SetOutPath "$INSTDIR"
   WriteUninstaller "$INSTDIR\Uninstall.exe"
   CreateDirectory "$SMPROGRAMS\RShell"
@@ -115,6 +120,7 @@ Section "Uninstall"
   RMDir "$SMPROGRAMS\RShell"
   Delete "$INSTDIR\rshell.exe"
   Delete "$INSTDIR\rshell-cli.exe"
+  Delete "$INSTDIR\rshell-shell.exe"
   RMDir /r "$INSTDIR\agent-sdk"
   Delete "$INSTDIR\README.md"
   Delete "$INSTDIR\LICENSE"
@@ -128,6 +134,7 @@ Section "Uninstall"
   RMDir "$INSTDIR\docs"
   Delete "$INSTDIR\licenses\Geist-OFL.txt"
   Delete "$INSTDIR\licenses\Lucide.txt"
+  Delete "$INSTDIR\licenses\rubash-MIT.txt"
   RMDir "$INSTDIR\licenses"
   Delete "$INSTDIR\Uninstall.exe"
   RMDir "$INSTDIR"

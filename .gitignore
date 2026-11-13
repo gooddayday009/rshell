@@ -2,3 +2,19 @@
 /dist/
 *.tmp
 
+# Frontend dependencies and build caches (also left behind when switching branches)
+node_modules/
+.vite/
+*.tsbuildinfo
+/desktop/dist/
+/desktop/coverage/
+
+# Generated Tauri schemas
+/crates/rshell-desktop/gen/schemas/
+
+# Local environment overrides; keep shareable templates
+.env
+.env.*
+!.env.example
+!.env.template
+

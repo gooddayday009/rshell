@@ -117,6 +117,23 @@ impl Terminal {
         self.history_limit = lines;
     }
 
+    /// Leave remote input modes without clearing the normal screen or its history.
+    pub fn resume_prompt(&mut self) {
+        self.parser = Processor::new();
+        self.feed(b"\x1b[?1049l\x1b7\x1b[r\x1b8\x1b[0m\x1b[?1l\x1b[?2004l\x1b[?25h");
+    }
+
+    /// Save the current screen in bounded scrollback before a new connection can clear it.
+    pub fn archive_screen(&mut self) {
+        self.resume_prompt();
+        self.feed(format!("\x1b[{};1H", self.size.rows).as_bytes());
+        for _ in 0..self.size.rows {
+            self.feed(b"\r\n");
+        }
+        self.feed(b"\x1b[H");
+        self.bottom();
+    }
+
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<u8> {
         self.snapshot_cache.take();
         let mut replies = Vec::new();

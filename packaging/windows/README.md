@@ -22,6 +22,7 @@
 
 - `target/release/rshell.exe`
 - `target/release/rshell-cli.exe`（控制台程序，便携包和安装器均包含；不自动修改 PATH）
+- `target/release/rshell-shell.exe`（内置 Shell，必须与主程序同目录；安装器和便携包均包含，并附带 `licenses/rubash-MIT.txt`）
 - `dist/RShell-<版本>-windows-x64-portable/`
 - 同名 `.zip` 和 `.zip.sha256`
 

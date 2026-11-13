@@ -289,6 +289,9 @@ pub struct HostPrompt {
 pub struct Tab {
     jumpserver: Option<jumpserver_view::SessionRef>,
     pub local: bool,
+    local_shell: rshell_core::local::Shell,
+    remote_target: Option<(Profile, Option<jumpserver_view::SessionRef>)>,
+    return_to_shell: bool,
     pub font_size_override: Option<f32>,
     pub id: Uuid,
     pub profile: Profile,
@@ -323,11 +326,25 @@ impl Tab {
             && !self.profile.tunnel_only
             && (self.local || self.profile.protocol == Protocol::Ssh)
     }
+    fn shell_guidance(&self) -> &'static str {
+        if !self.local {
+            "远端系统与 Shell 尚未确认，先确认环境或标注命令适用前提。"
+        } else if self.local_shell == rshell_core::local::Shell::Builtin {
+            "本地使用 rubash 引擎的 Bash 兼容语法和 bash 代码块；不等同于 Linux 内核，外部命令是否安装需确认。ssh 命令通过 RShell 自身认证界面连接。"
+        } else if self.local_shell == rshell_core::local::Shell::Bash {
+            "本地使用 Bash 语法和 bash 代码块；Windows 上由 Git Bash 执行，不是 Linux 内核环境，不假定 systemd 或 Linux 软件包管理器可用。"
+        } else if cfg!(windows) {
+            "本地使用 PowerShell 语法和 powershell 代码块，不使用 CMD/bat 语法。"
+        } else {
+            "本地使用 zsh 语法和 zsh 代码块。"
+        }
+    }
+
     fn execution_identity(&self) -> String {
         if self.local {
             format!(
                 "本地 {} · {} · 会话 {}（启动 Shell；手动切换后需重新确认）",
-                rshell_core::local::shell_label(),
+                self.local_shell.label(),
                 self.title,
                 self.id
             )
@@ -372,6 +389,13 @@ impl Tab {
         }
     }
     pub fn input(&mut self, bytes: Vec<u8>) {
+        if self.finished && !self.connected {
+            if bytes == b"\r" {
+                self.return_to_shell = true;
+            }
+            return;
+        }
+
         // Output parsing owns this lock too. Never delay keyboard delivery for it.
         self.pending_bottom = true;
         if let Ok(mut terminal) = self.terminal.try_lock() {
@@ -1333,7 +1357,7 @@ impl App {
             }));
         }
         if !demo {
-            app.start_local(&cc.egui_ctx, None);
+            app.start_shell(&cc.egui_ctx, None);
             app.startup_local_tab = app.tabs.last().map(|tab| tab.id);
         }
         cc.egui_ctx.all_styles_mut(|style| {
@@ -1389,6 +1413,7 @@ impl App {
             style.visuals.selection.stroke = egui::Stroke::new(1.0, ink);
         });
         crate::ui_appearance::apply_palette(&cc.egui_ctx, &app.config);
+        app.submit(Action::DetectShellPaths { replace: false }, Pending::Update);
         if !app.submit(Action::ReadAiHistory, Pending::AiHistoryLoad) {
             app.ai_history_loaded = true;
             app.ai_error = std::mem::take(&mut app.message);
@@ -1409,11 +1434,18 @@ impl App {
             14 => self.choose_session_file(ctx, None),
             13 => self.import_open = true,
             0 => self.open_profile(self.new_profile()),
-            1 => self.start_local(ctx, None),
+            1 => self.start_shell(ctx, None),
             2 => {
                 if let Some(tab) = self.tabs.get(self.active) {
-                    if tab.local {
-                        self.start_local(ctx, Some(tab.id));
+                    if let Some((profile, reference)) = tab.remote_target.clone() {
+                        if let Some(mut reference) = reference {
+                            reference.reconnect_tab = Some(tab.id);
+                            self.reconnect_jumpserver(ctx, reference);
+                        } else {
+                            self.open_profile_editor(profile, true, Some(tab.id));
+                        }
+                    } else if tab.local {
+                        self.start_shell(ctx, Some(tab.id));
                     } else if let Some(mut reference) = tab.jumpserver.clone() {
                         reference.reconnect_tab = Some(tab.id);
                         self.reconnect_jumpserver(ctx, reference);
@@ -1478,10 +1510,10 @@ impl App {
             return;
         };
         match action {
-            TabAction::New => self.start_local(ctx, None),
+            TabAction::New => self.start_shell(ctx, None),
             TabAction::Duplicate => {
                 if tab.local {
-                    self.start_local(ctx, None);
+                    self.start_shell(ctx, None);
                 } else if let Some(reference) = tab.jumpserver.clone() {
                     self.reconnect_jumpserver(ctx, reference);
                 } else {
@@ -1591,6 +1623,9 @@ impl App {
         Tab {
             jumpserver: None,
             local: false,
+            local_shell: rshell_core::local::Shell::System,
+            remote_target: None,
+            return_to_shell: false,
             font_size_override: None,
             id: Uuid::new_v4(),
             title: profile.name.clone(),
@@ -1871,10 +1906,21 @@ impl App {
         let mut tab = self.configured_tab(profile);
         if let Some(id) = reconnect_tab {
             let index = self.tabs.iter().position(|tab| tab.id == id)?;
+            if self.startup_local_tab == Some(id) {
+                self.startup_local_tab = None;
+            }
             tab.id = id;
-            tab.title = self.tabs[index].title.clone();
+            if !self.tabs[index].local || self.tabs[index].remote_target.is_some() {
+                tab.title = self.tabs[index].title.clone();
+            }
             tab.font_size_override = self.tabs[index].font_size_override;
             tab.focus = self.active == index;
+            // Move the parser into a new Arc: a cancelled worker can only write to the old one.
+            let mut previous = self.tabs[index].terminal.lock().unwrap();
+            let mut retained = std::mem::replace(&mut *previous, Terminal::with_history(80, 24, 0));
+            retained.archive_screen();
+            tab.terminal = Arc::new(Mutex::new(retained));
+            drop(previous);
             self.ai_command = None;
             self.tabs[index] = tab;
             Some(index)
@@ -1885,10 +1931,30 @@ impl App {
         }
     }
 
-    fn start_local(&mut self, ctx: &egui::Context, reconnect_tab: Option<Uuid>) {
+    fn start_shell(&mut self, ctx: &egui::Context, reconnect_tab: Option<Uuid>) {
+        let shell = match self.config.session_options.selected_shell() {
+            rshell_core::config::DefaultShell::Builtin => rshell_core::local::Shell::Builtin,
+            rshell_core::config::DefaultShell::GitBash => rshell_core::local::Shell::Bash,
+            rshell_core::config::DefaultShell::PowerShell => rshell_core::local::Shell::System,
+        };
+        let executable = match shell {
+            rshell_core::local::Shell::Bash => &self.config.session_options.git_bash_path,
+            rshell_core::local::Shell::System => &self.config.session_options.powershell_path,
+            rshell_core::local::Shell::Builtin => "",
+        };
+        let executable = (!executable.is_empty()).then(|| PathBuf::from(executable));
+        let remote_target = reconnect_tab
+            .and_then(|id| self.tabs.iter().find(|tab| tab.id == id))
+            .and_then(|tab| {
+                if tab.local {
+                    tab.remote_target.clone()
+                } else {
+                    Some((tab.profile.clone(), tab.jumpserver.clone()))
+                }
+            });
         let Some(index) = self.prepare_connection_tab(
             Profile {
-                name: rshell_core::local::shell_label().into(),
+                name: shell.label().into(),
                 ..Default::default()
             },
             reconnect_tab,
@@ -1897,15 +1963,30 @@ impl App {
         };
         let tab = &mut self.tabs[index];
         tab.local = true;
-        tab.status = "正在启动本地终端…".into();
-        tab.connection = Some(rshell_core::local::connect(
+        tab.local_shell = shell;
+        tab.remote_target = remote_target;
+        tab.status = format!("正在启动 {}…", shell.label());
+        tab.connection = Some(rshell_core::local::connect_shell_path(
             self.runtime.handle(),
             TerminalAdapter {
                 terminal: tab.terminal.clone(),
                 ctx: ctx.clone(),
             },
+            shell,
+            executable,
         ));
         ctx.request_repaint();
+    }
+
+    fn poll_shell_actions(&mut self, ctx: &egui::Context) {
+        let actions: Vec<_> = self
+            .tabs
+            .iter_mut()
+            .filter_map(|tab| std::mem::take(&mut tab.return_to_shell).then_some(tab.id))
+            .collect();
+        for id in actions {
+            self.start_shell(ctx, Some(id));
+        }
     }
 
     fn switch_tab(&mut self, direction: isize, ctx: &egui::Context) {
@@ -1964,11 +2045,17 @@ impl App {
     fn poll(&mut self) {
         let mut recent = Vec::new();
         let mut jump_reconnects = Vec::new();
+        let mut shell_ssh_requests = Vec::new();
         for tab in &mut self.tabs {
             let mut remote_finished = false;
             if let Some(connection) = &mut tab.connection {
                 while let Ok(event) = connection.events.try_recv() {
                     match event {
+                        ssh::Event::OpenSsh(target) => {
+                            if tab.local && tab.local_shell == rshell_core::local::Shell::Builtin {
+                                shell_ssh_requests.push((tab.id, target));
+                            }
+                        }
                         ssh::Event::TransferPrompt { upload, reply } => {
                             if tab.jumpserver.is_some() {
                                 let _ = reply.send(None);
@@ -2004,7 +2091,7 @@ impl App {
                             } else if tab.local {
                                 format!(
                                     "本地 {} · {}",
-                                    rshell_core::local::shell_label(),
+                                    tab.local_shell.label(),
                                     if cfg!(windows) {
                                         "初始提示符已就绪"
                                     } else {
@@ -2050,9 +2137,10 @@ impl App {
                             tab.finished = true;
                             tab.host_prompt = None;
                             tab.status = match result {
-                                Ok(()) => "已断开".into(),
-                                Err(error) => error,
+                                Ok(()) => "已断开 · 按回车进入默认 Shell".into(),
+                                Err(error) => format!("{error} · 按回车进入默认 Shell"),
                             };
+                            self.ai_command = None;
                         }
                     }
                 }
@@ -2069,6 +2157,21 @@ impl App {
             {
                 tab.host_prompt = None;
             }
+        }
+        if let Some((id, target)) = shell_ssh_requests.into_iter().next()
+            && let Some(index) = self.tabs.iter().position(|tab| tab.id == id)
+        {
+            self.active = index;
+            let mut profile = self.new_profile();
+            profile.name = if target.username.is_empty() {
+                target.host.clone()
+            } else {
+                format!("{}@{}", target.username, target.host)
+            };
+            profile.host = target.host;
+            profile.username = target.username;
+            profile.port = target.port;
+            self.open_profile_editor(profile, false, Some(id));
         }
         for reference in jump_reconnects {
             self.queue_jumpserver_reconnect(reference);
@@ -2347,6 +2450,9 @@ impl App {
     }
 
     fn editor(&mut self, ctx: &egui::Context) {
+        if self.editor.is_some() && (!self.keys.loaded || self.keys.refresh_requested) {
+            self.refresh_user_keys(ctx.clone());
+        }
         let Some(editor) = &mut self.editor else {
             return;
         };
@@ -2513,6 +2619,37 @@ impl App {
                                         });
                                         ui.end_row();
                                         if editor.profile.auth == AuthMethod::PrivateKey {
+                                            ui.label("用户密钥");
+                                            ui.horizontal(|ui| {
+                                                egui::ComboBox::from_id_salt("session_user_key")
+                                                    .width(280.0)
+                                                    .selected_text(self.keys.items.iter()
+                                                        .find(|item| item.path.to_string_lossy() == editor.profile.key_path)
+                                                        .map(|item| item.name.as_str()).unwrap_or("选择已生成 / 导入的密钥"))
+                                                    .show_ui(ui, |ui| {
+                                                        for item in &self.keys.items {
+                                                            let path = item.path.to_string_lossy().into_owned();
+                                                            if ui.selectable_label(editor.profile.key_path == path,
+                                                                format!("{} · {}", item.name, item.algorithm))
+                                                                .on_hover_text(&item.fingerprint).clicked() {
+                                                                editor.profile.key_path = path;
+                                                                editor.secret.zeroize();
+                                                                editor.loaded_identity = None;
+                                                                editor.profile.remember_secret = false;
+                                                            }
+                                                        }
+                                                        if self.keys.items.is_empty() { ui.weak("暂无密钥，请先在用户密钥管理器生成或导入"); }
+                                                    });
+                                                if ui.button("刷新").clicked() { self.keys.refresh_requested = true; }
+                                            });
+                                            ui.end_row();
+                                            ui.label("");
+                                            ui.vertical(|ui| {
+                                                ui.weak("托管密钥由当前系统用户解密，无需填写私钥口令");
+                                                if self.keys.task.is_some() { ui.label("正在加载用户密钥…"); }
+                                                else if self.keys.notice != "操作完成" && !self.keys.notice.is_empty() { ui.label(&self.keys.notice); }
+                                            });
+                                            ui.end_row();
                                             ui.label("私钥路径");
                                             ui.horizontal(|ui| {
                                                 ui.add(
@@ -2835,6 +2972,7 @@ impl eframe::App for App {
             self.close_when_idle = true;
         }
         self.poll();
+        self.poll_shell_actions(ctx);
         if ctx.input(|input| input.viewport().close_requested()) {
             if !self.exit_approved
                 && !self.smoke
@@ -2922,7 +3060,7 @@ impl eframe::App for App {
             && !self.tabs.iter().any(|tab| tab.host_prompt.is_some());
         if allow_terminal_input {
             if consume_shortcut(&ctx, &self.config.shortcuts.new_local) {
-                self.start_local(&ctx, None);
+                self.start_shell(&ctx, None);
                 allow_terminal_input = false;
             }
             if consume_shortcut(&ctx, &self.config.shortcuts.close_tab) {
@@ -2962,7 +3100,7 @@ impl eframe::App for App {
                                 vec![
                                     ("新建 SSH / Telnet / 串口会话…", 0),
                                     ("新建 SSH 隧道连接…", 16),
-                                    (rshell_core::local::shell_label(), 1),
+                                    ("默认 Shell", 1),
                                     ("关闭当前标签", 8),
                                 ],
                             ),
@@ -3136,7 +3274,7 @@ impl eframe::App for App {
                     ui.horizontal(|ui| {
                         for (tip, id) in [
                             ("新建 SSH / Telnet / 串口会话", 0),
-                            (rshell_core::local::shell_label(), 1),
+                            ("默认 Shell", 1),
                             ("重新连接", 2),
                             ("断开连接", 3),
                             ("复制选区", 4),
@@ -3362,7 +3500,7 @@ impl eframe::App for App {
                     );
                     ui.separator();
                     ui.label(if tab.local {
-                        rshell_core::local::shell_label().into()
+                        tab.local_shell.label().into()
                     } else {
                         tab.profile.endpoint()
                     });
@@ -3515,11 +3653,11 @@ impl eframe::App for App {
                             ui.label(RichText::new("保存常用服务器").strong());
                             ui.label(
                                 RichText::new(
-                                    "新建会话可配置 SSH 或串口。\n也可在右侧终端直接输入：",
+                                    "新建会话可配置 SSH 或串口。\n内置 Shell 支持 Bash 兼容语法：",
                                 )
                                 .weak(),
                             );
-                            ui.code("ssh root@hostname");
+                            ui.code("ssh user@host");
                         }
                     });
                 });
@@ -3565,10 +3703,7 @@ impl eframe::App for App {
                             ui.add_space(12.0);
                             ui.label("原生 Rust 桌面终端 · SSH 2 · 多标签会话");
                             ui.add_space(24.0);
-                            if ui
-                                .button(format!("+ 打开本地 {}", rshell_core::local::shell_label()))
-                                .clicked()
-                            {
+                            if ui.button("+ 打开默认 Shell").clicked() {
                                 local_reopen = true;
                             }
                         });
@@ -3795,7 +3930,7 @@ impl eframe::App for App {
                                                 [20.0, 20.0],
                                                 egui::Button::new("+").frame(false),
                                             )
-                                            .on_hover_text("新建本地终端")
+                                            .on_hover_text("新建默认 Shell")
                                             .clicked()
                                         {
                                             local_reopen = true;
@@ -3871,7 +4006,7 @@ impl eframe::App for App {
             self.add_terminal_selection_to_ai(tab_id, &text);
         }
         if local_reopen {
-            self.start_local(&ctx, None);
+            self.start_shell(&ctx, None);
         }
         self.rename_dialog(&ctx);
         self.folder_dialog(&ctx);
@@ -4536,6 +4671,36 @@ mod tests {
     }
 
     #[test]
+    fn disconnected_enter_requests_shell_and_bash_input_keeps_full_syntax() {
+        let (_, mut tab) = setup();
+        tab.connected = false;
+        tab.finished = true;
+        tab.terminal.lock().unwrap().feed(b"old-output");
+        tab.input(b"ignored".to_vec());
+        tab.input(b"\rwhoami\r".to_vec());
+        assert!(!tab.return_to_shell);
+        tab.input(b"\r".to_vec());
+        assert!(tab.return_to_shell);
+        assert!(
+            tab.terminal
+                .lock()
+                .unwrap()
+                .find("old-output", None, false)
+                .is_some()
+        );
+        tab.local = true;
+        tab.local_shell = rshell_core::local::Shell::Bash;
+        tab.connected = true;
+        tab.finished = false;
+        tab.test_sent.clear();
+        let command = b"for i in 1 2; do echo \"$i\"; done | sort > result.txt\r";
+        tab.input(command.to_vec());
+        assert_eq!(written(&tab), command);
+        assert!(tab.execution_identity().contains("Git Bash"));
+        assert!(!tab.execution_identity().contains("PowerShell"));
+    }
+
+    #[test]
     fn remote_exit_keeps_shell_target_for_toolbar_reconnect() {
         use eframe::App as _;
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target");
@@ -4626,7 +4791,24 @@ mod tests {
             output.textures_delta.clear();
         }
         let original = app.tabs[app.active].id;
+        app.startup_local_tab = Some(original);
         let count = app.tabs.len();
+        app.tabs[app.active].input(b"\r".to_vec());
+        app.poll_shell_actions(&ctx);
+        assert!(app.tabs[app.active].local);
+        assert_eq!(
+            app.tabs[app.active].local_shell,
+            rshell_core::local::Shell::Builtin
+        );
+        assert!(app.tabs[app.active].remote_target.is_some());
+        let terminal = app.tabs[app.active].terminal.clone();
+        assert!(
+            terminal
+                .lock()
+                .unwrap()
+                .find("retained-screen", None, false)
+                .is_some()
+        );
         app.chrome_action(2, &ctx);
         let target = &app.editor.as_ref().unwrap().profile;
         assert_eq!(target.id, profile.id);
@@ -4647,6 +4829,26 @@ mod tests {
         }
         assert_eq!(app.tabs.len(), count);
         assert_eq!(app.tabs[app.active].id, original);
+        assert!(app.startup_local_tab.is_none());
+        let reconnected = app.tabs[app.active].terminal.clone();
+        assert!(!Arc::ptr_eq(&terminal, &reconnected));
+        terminal.lock().unwrap().feed(b"stale-worker-output");
+        for text in ["retained-history", "retained-screen"] {
+            assert!(
+                reconnected
+                    .lock()
+                    .unwrap()
+                    .find(text, None, false)
+                    .is_some()
+            );
+        }
+        assert!(
+            reconnected
+                .lock()
+                .unwrap()
+                .find("stale-worker-output", None, false)
+                .is_none()
+        );
         // Explicit opt-in still clears the terminal when the connection closes.
         app.config.session_options.clear_scrollback_on_close = true;
         app.tabs[app.active]
@@ -4712,8 +4914,18 @@ mod tests {
             let _ = blocked.recv();
         });
         started.recv_timeout(Duration::from_secs(5)).unwrap();
+        let initial_count = app.tabs.len();
+        app.tab_action(app.active, TabAction::New, &ctx);
+        assert_eq!(app.tabs.len(), initial_count + 1);
+        assert!(app.tabs[app.active].local);
+        assert_eq!(
+            app.tabs[app.active].local_shell,
+            rshell_core::local::Shell::Builtin
+        );
+        assert!(app.tabs[app.active].connection.is_some());
         let old_count = app.tabs.len();
-        app.start_local(&ctx, None);
+        app.config.session_options.use_powershell = true;
+        app.start_shell(&ctx, None);
         assert_eq!(app.tabs.len(), old_count + 1);
         assert_eq!(app.active, old_count);
         assert!(!app.tabs[old_count].connected);

@@ -403,6 +403,13 @@ mod tests {
     #[test]
     fn pointer_drag_cancel_and_invalid_descendant_do_not_change_tree() {
         let mut h = Harness::new(true);
+        // Finish startup updates before comparing changes caused by dragging.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !h.app.pending.is_empty() {
+            h.app.poll_store(&h.ctx);
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
         let before = serde_json::to_value(&h.app.config).unwrap();
         h.drag("Folder B", "Folder A", -14.0, true);
         h.drag("Folder A", "Nested", 0.0, false);

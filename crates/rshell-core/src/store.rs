@@ -8,6 +8,14 @@ use zeroize::Zeroizing;
 
 pub enum Action {
     CliEnabled(bool),
+    DefaultShell(crate::config::DefaultShell),
+    DetectShellPaths {
+        replace: bool,
+    },
+    ShellPath {
+        shell: crate::config::DefaultShell,
+        path: String,
+    },
     ScrollbackLines(usize),
     ChromeVisibility(crate::config::ChromeVisibility),
     SaveJumpServer(crate::jumpserver::Saved),
@@ -114,6 +122,7 @@ pub enum Outcome {
 
 #[derive(Clone, Copy)]
 pub enum SessionOption {
+    UsePowershell,
     ConfirmExit,
     ConfirmDisconnect,
     ClearScrollbackOnClose,
@@ -547,7 +556,43 @@ impl<C: Credentials> State<C> {
                 }
                 candidate.shortcuts = shortcuts;
             }
+            Action::DefaultShell(shell) => candidate.session_options.default_shell = Some(shell),
+            Action::DetectShellPaths { replace } => {
+                for shell in [
+                    crate::config::DefaultShell::GitBash,
+                    crate::config::DefaultShell::PowerShell,
+                ] {
+                    let destination = if shell == crate::config::DefaultShell::GitBash {
+                        &mut candidate.session_options.git_bash_path
+                    } else {
+                        &mut candidate.session_options.powershell_path
+                    };
+                    if replace || destination.is_empty() {
+                        *destination = crate::local::detect_path(shell)
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                    }
+                }
+            }
+            Action::ShellPath { shell, path } => {
+                if !path.is_empty()
+                    && (!std::path::Path::new(&path).is_absolute()
+                        || !std::path::Path::new(&path).is_file())
+                {
+                    bail!("Shell 路径必须指向存在的绝对文件路径");
+                }
+                match shell {
+                    crate::config::DefaultShell::GitBash => {
+                        candidate.session_options.git_bash_path = path
+                    }
+                    crate::config::DefaultShell::PowerShell => {
+                        candidate.session_options.powershell_path = path
+                    }
+                    crate::config::DefaultShell::Builtin => bail!("内置 Shell 无需设置外部路径"),
+                }
+            }
             Action::SessionOption(option, enabled) => match option {
+                SessionOption::UsePowershell => candidate.session_options.use_powershell = enabled,
                 SessionOption::ConfirmExit => candidate.session_options.confirm_exit = enabled,
                 SessionOption::ConfirmDisconnect => {
                     candidate.session_options.confirm_disconnect = enabled

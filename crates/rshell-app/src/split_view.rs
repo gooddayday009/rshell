@@ -297,10 +297,7 @@ pub(super) fn terminal_panes(
                             });
                         if ui
                             .add_sized([26.0, 24.0], egui::Button::new("+"))
-                            .on_hover_text(format!(
-                                "在此屏新建本地 {}",
-                                rshell_core::local::shell_label()
-                            ))
+                            .on_hover_text("在此屏新建默认 Shell")
                             .clicked()
                         {
                             groups.activate(tabs, active, pane);

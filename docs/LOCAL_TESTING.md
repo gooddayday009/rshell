@@ -453,3 +453,15 @@ SFTP 从内嵌 egui Window 改为 immediate 原生 viewport，独立标题栏、
 文件列表改为单一整行点击/拖动响应区，图标、名称、大小和空白均可选中，整行显示主题选中背景。左右栏提供独立的当前目录文件名筛选框（大小写不敏感、中文子串匹配），显示匹配数和无匹配提示；改动查询清除旧选择，筛选后的行保留原条目索引，上传/下载/双击/拖动均对应正确文件。查找不递归遍历子目录，也不搜索文件内容。
 
 针对性测试：`cargo test --locked -p rshell transfer_view` 验证深浅主题图标/名称/大小位置点击、中文与大小写查找、过滤后选择索引、跨栏拖放及原有布局。
+
+### RShell Bash（2026-11-13）
+
+默认本地 Shell 通过 ConPTY 运行 Git for Windows 的 Bash。需要已安装 Git；普通工作区检查不强制要求本机存在该外部程序，因此真实 Bash PTY 测试默认忽略，可单独运行：
+
+```powershell
+cargo test --locked -p rshell-core git_bash_full_syntax_completion_history_interrupt_and_exit -- --ignored --nocapture
+```
+
+该测试只在 `target/` 内创建临时文件，覆盖完整 Bash 语法的代表性组合（数组、函数、循环、命令替换、管道、重定向、heredoc）、中文输出、Tab 文件名补全、上下键历史、Ctrl+C、退出和保留旧远端历史。不会连接外部 SSH。
+
+`./scripts/test.ps1` 继续验证配置切换、原标签回退和重连、AI 的本地 Bash 身份及语言匹配。原生单场景可使用隔离配置运行 `--smoke-test --smoke-tree-narrow` 和 `--smoke-test --smoke-session-options --smoke-light`；当前截图在 `target/bash-gui/`。真实 Linux/OpenSSH、输入法、全屏应用及模型端到端需要另外验收。

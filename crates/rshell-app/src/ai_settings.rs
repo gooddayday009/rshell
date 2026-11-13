@@ -377,10 +377,10 @@ fn reply_parts(reply: &str) -> Vec<ReplyPart<'_>> {
 fn executable_code<'a>(
     code: &'a str,
     language: &str,
-    local: bool,
+    system_local: bool,
     blocked: &[String],
 ) -> Result<&'a str, &'static str> {
-    let accepted = if local && cfg!(windows) {
+    let accepted = if system_local && cfg!(windows) {
         matches!(language, "" | "powershell" | "pwsh")
     } else {
         matches!(language, "" | "bash" | "sh" | "shell" | "zsh")
@@ -700,8 +700,7 @@ impl App {
             .ai_selected_connection
             .and_then(|id| self.tabs.iter().find(|t| t.id == id && t.connected));
         let environment = match selected {
-            Some(tab) if tab.local && !cfg!(windows) => format!("目标：{}。本地使用 zsh 语法，代码块标记为 zsh；用户手动切换 Shell 后需重新确认环境。", tab.execution_identity()),
-            Some(tab) if tab.local && cfg!(windows) => format!("目标：{}。命令必须使用 PowerShell 语法，代码块使用 powershell 标记，不使用 CMD/bat 语法。若用户手动切换 Shell，先确认当前环境。", tab.execution_identity()),
+            Some(tab) if tab.local => format!("目标：{}。{}若用户手动切换 Shell，先确认当前环境。", tab.execution_identity(), tab.shell_guidance()),
             Some(tab) => format!("用户选择了 SSH 终端 {}，远端系统与 Shell 尚未确认。先确认环境或明确标注命令适用的 Shell 与前提，不得把远端当成本地 PowerShell。", tab.execution_identity()),
             None => "用户尚未选择执行目标。不要假定操作系统、Shell、权限或安装的软件；生成命令前先确认必要环境。".to_owned(),
         };
@@ -1093,7 +1092,7 @@ impl App {
                                                         ui.horizontal(|ui| {
                                                             let executable = self.ai_selected_connection
                                                                 .and_then(|id| self.tabs.iter().find(|t| t.id == id && t.connected))
-                                                                .map(|tab| executable_code(code, language, tab.local, &self.config.ai.blocked_commands));
+                                                                .map(|tab| executable_code(code, language, tab.local && tab.local_shell == rshell_core::local::Shell::System, &self.config.ai.blocked_commands));
                                                             let disabled_reason = match &executable {
                                                                 None => "请先选择已连接的目标终端",
                                                                 Some(Err(reason)) => reason,
@@ -2207,6 +2206,27 @@ mod tests {
                 .unwrap()
                 .target
                 .contains("本地 Windows PowerShell")
+        );
+        // Changing from PowerShell to Bash invalidates the queued command too.
+        app.tabs[0].local_shell = rshell_core::local::Shell::Bash;
+        let mut output = ctx.run_ui(egui::RawInput::default(), |_| {
+            app.draw_ai_command_confirmation(&ctx)
+        });
+        output.textures_delta.clear();
+        assert!(app.ai_command.is_none());
+        let prompt = app.ai_system_prompt().content;
+        assert!(prompt.contains("本地 Git Bash"));
+        assert!(prompt.contains("Bash 语法和 bash"));
+        assert!(!prompt.contains("本地使用 PowerShell"));
+        assert!(executable_code("pwd", "bash", false, &[]).is_ok());
+        assert!(executable_code("Get-Process", "powershell", false, &[]).is_err());
+        app.prepare_ai_command("pwd".into());
+        assert!(
+            app.ai_command
+                .as_ref()
+                .unwrap()
+                .target
+                .contains("本地 Git Bash")
         );
         // A session changing its declared environment invalidates the queued command too.
         app.tabs[0].local = false;

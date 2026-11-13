@@ -14,7 +14,7 @@ pub fn show(
         return None;
     }
     // A newly spawned process can still be initializing. Do not queue invisible commands.
-    let allow_input = allow_input && (!tab.local || tab.connected);
+    let allow_input = allow_input && (!tab.local || tab.connected || tab.finished);
     let mut selection_for_ai = None;
     let font_size = config.font_size;
     if tab.show_search {

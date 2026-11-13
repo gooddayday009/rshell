@@ -7,14 +7,16 @@ type KeyResult = Result<Vec<KeyInfo>, String>;
 pub(super) struct KeyManager {
     pub open: bool,
     pub hosts_open: bool,
-    items: Vec<KeyInfo>,
+    pub(super) items: Vec<KeyInfo>,
+    pub(super) loaded: bool,
+    pub(super) refresh_requested: bool,
     selected: Option<PathBuf>,
-    task: Option<std::sync::mpsc::Receiver<KeyResult>>,
+    pub(super) task: Option<std::sync::mpsc::Receiver<KeyResult>>,
     name: String,
     rsa: bool,
     bits: usize,
     password: Zeroizing<String>,
-    notice: String,
+    pub(super) notice: String,
     delete: bool,
     properties: bool,
 }
@@ -31,6 +33,8 @@ impl App {
         let directory = self.path.parent().unwrap().join("user-keys");
         let (tx, rx) = std::sync::mpsc::channel();
         self.keys.task = Some(rx);
+        self.keys.loaded = true;
+        self.keys.refresh_requested = false;
         self.keys.notice = "正在处理…".into();
         std::thread::spawn(move || {
             let result = action(directory.clone())
@@ -52,6 +56,14 @@ impl App {
                     self.keys.task = None;
                     match result {
                         Ok(items) => {
+                            if !items
+                                .iter()
+                                .any(|item| Some(&item.path) == self.keys.selected.as_ref())
+                            {
+                                self.keys.selected = None;
+                                self.keys.properties = false;
+                                self.keys.delete = false;
+                            }
                             self.keys.items = items;
                             self.keys.notice = "操作完成".into();
                         }
@@ -90,29 +102,47 @@ impl App {
         let mut open = true;
         egui::Window::new("用户密钥管理器").open(&mut open)
                 .collapsible(false)
-                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO).default_size([780.0, 560.0]).show(ctx, |ui| {
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .frame(egui::Frame::window(&ctx.style_of(if self.config.light_theme { egui::Theme::Light } else { egui::Theme::Dark })).inner_margin(16.0))
+                .default_size([640.0, 480.0]).min_width(480.0).vscroll(true).show(ctx, |ui| {
             settings_view::dialog_style(ui, self.config.ui_font_size);
+            ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
             ui.weak("私钥由当前系统用户加密保护；不会显示私钥正文。名称也作为公钥注释。");
-            egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
-                egui::Grid::new("user_key_list").striped(true).min_col_width(130.0).show(ui, |ui| {
-                    ui.strong("名称 / 注释"); ui.strong("类型"); ui.strong("长度（位）"); ui.end_row();
+            ui.add_space(12.0);
+            egui_extras::TableBuilder::new(ui)
+                .id_salt("user_key_list")
+                .striped(true)
+                .sense(egui::Sense::click())
+                .column(egui_extras::Column::remainder().at_least(120.0))
+                .column(egui_extras::Column::initial(112.0))
+                .column(egui_extras::Column::initial(88.0))
+                .max_scroll_height(200.0)
+                .header(32.0, |mut row| {
+                    row.col(|ui| { ui.strong("名称 / 注释"); });
+                    row.col(|ui| { ui.strong("类型"); });
+                    row.col(|ui| { ui.strong("长度（位）"); });
+                })
+                .body(|mut body| {
                     for item in &self.keys.items {
-                        if ui.selectable_label(self.keys.selected.as_ref() == Some(&item.path), &item.name).clicked() {
-                            self.keys.selected = Some(item.path.clone());
-                            self.keys.delete = false;
-                            self.keys.properties = false;
-                        }
-                        ui.label(&item.algorithm);
-                        ui.label(if item.bits == 0 { "—".into() } else { item.bits.to_string() });
-                        ui.end_row();
+                        body.row(36.0, |mut row| {
+                            row.set_selected(self.keys.selected.as_ref() == Some(&item.path));
+                            row.col(|ui| { ui.add(egui::Label::new(&item.name).truncate().selectable(false)); });
+                            row.col(|ui| { ui.add(egui::Label::new(&item.algorithm).selectable(false)); });
+                            row.col(|ui| { ui.add(egui::Label::new(RichText::new(if item.bits == 0 { "—".into() } else { item.bits.to_string() }).monospace()).selectable(false)); });
+                            if row.response().on_hover_text(&item.fingerprint).clicked() {
+                                self.keys.selected = Some(item.path.clone());
+                                self.keys.delete = false;
+                                self.keys.properties = false;
+                            }
+                        });
                     }
                 });
-                if self.keys.items.is_empty() { ui.label("暂无用户密钥。填写名称后生成，或导入已有私钥。"); }
-            });
+            if self.keys.items.is_empty() { ui.weak("暂无用户密钥，填写名称后生成或导入已有私钥"); }
+            ui.add_space(8.0);
             let selected = self.keys.items.iter().find(|k| Some(&k.path) == self.keys.selected.as_ref()).cloned();
             let idle = self.keys.task.is_none();
             ui.add_enabled_ui(idle, |ui| {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     if ui.button("刷新").clicked() { self.refresh_user_keys(ctx.clone()); }
                     if ui.add_enabled(selected.is_some(), egui::Button::new("属性")).clicked() { self.keys.properties = !self.keys.properties; }
                     if ui.add_enabled(selected.is_some(), egui::Button::new("删除…")).clicked() { self.keys.delete = true; }
@@ -166,10 +196,16 @@ impl App {
                         ui.weak("选择后在会话属性中检查并保存；托管密钥无需填写口令。");
                     });
                 }
+                ui.add_space(8.0);
                 ui.separator();
-                ui.horizontal(|ui| { ui.label("名称 / 注释"); ui.text_edit_singleline(&mut self.keys.name); });
+                ui.label("生成或导入密钥");
+                egui::Grid::new("user_key_fields").num_columns(2).spacing([16.0, 8.0]).show(ui, |ui| {
+                ui.label("名称 / 注释");
+                ui.add(egui::TextEdit::singleline(&mut self.keys.name).desired_width(280.0));
+                ui.end_row();
+                ui.label("生成类型");
                 ui.horizontal(|ui| {
-                    ui.label("生成类型");
+
                     ui.selectable_value(&mut self.keys.rsa, false, "Ed25519");
                     ui.selectable_value(&mut self.keys.rsa, true, "RSA");
                     if self.keys.rsa {
@@ -184,9 +220,10 @@ impl App {
                         self.key_task(ctx.clone(), move |dir| { user_keys::save(&dir, &user_keys::generate(&name, bits)?, &name)?; Ok(()) });
                     }
                 });
-                ui.horizontal(|ui| {
-                    ui.label("导入 / 导出口令");
-                    ui.add(egui::TextEdit::singleline(&mut *self.keys.password).password(true));
+                ui.end_row();
+                ui.label("导入 / 导出口令");
+                ui.add(egui::TextEdit::singleline(&mut *self.keys.password).password(true).desired_width(280.0));
+                ui.end_row();
                 });
                 ui.weak("导入支持 OpenSSH / PEM 私钥；导出为有口令保护的 OpenSSH 私钥，目标须为新文件。");
                 ui.horizontal(|ui| {
@@ -219,5 +256,115 @@ impl App {
         if !self.keys.open {
             self.keys.password.zeroize();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn render(app: &mut App, ctx: &egui::Context, events: Vec<egui::Event>) -> egui::FullOutput {
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                time: Some(ctx.input(|i| i.time) + 0.3),
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    if app.keys.open {
+                        egui::vec2(600.0, 760.0)
+                    } else {
+                        egui::vec2(1200.0, 900.0)
+                    },
+                )),
+                events,
+                ..Default::default()
+            },
+            |_| {
+                app.draw_key_managers(ctx);
+                app.editor(ctx);
+            },
+        );
+        output.textures_delta.clear();
+        output
+    }
+
+    fn click(app: &mut App, ctx: &egui::Context, text: &str) {
+        render(app, ctx, vec![]);
+        let output = render(app, ctx, vec![]);
+        let pos = output
+            .shapes
+            .iter()
+            .find_map(|shape| {
+                crate::composer_icons::find_text(&shape.shape, text)
+                    .map(|s| s.pos + s.galley.size() / 2.0)
+            })
+            .unwrap_or_else(|| panic!("missing {text}"));
+        for pressed in [true, false] {
+            render(
+                app,
+                ctx,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+    }
+
+    #[test]
+    fn key_row_and_session_picker_select_identity_without_old_secret() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/key-manager-tests");
+        std::fs::create_dir_all(&root).unwrap();
+        let temp = tempfile::tempdir_in(root).unwrap();
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut app = App::new(
+            &cc,
+            Config::default(),
+            temp.path().join("config.json"),
+            runtime,
+            true,
+            false,
+        )
+        .unwrap();
+        let path = temp.path().join("user-keys/test.rkey");
+        app.keys.items = vec![KeyInfo {
+            path: path.clone(),
+            name: "test-key".into(),
+            algorithm: "ssh-ed25519".into(),
+            bits: 256,
+            fingerprint: "SHA256:test".into(),
+            public_key: String::new(),
+        }];
+        app.keys.loaded = true;
+        app.keys.open = true;
+        // Clicking the algorithm cell must select the entire key, not only its name.
+        click(&mut app, &ctx, "ssh-ed25519");
+        assert_eq!(app.keys.selected, Some(path.clone()));
+        app.keys.open = false;
+        let mut editor = Editor::new(Profile {
+            auth: AuthMethod::PrivateKey,
+            remember_secret: true,
+            ..Default::default()
+        });
+        editor.secret = "old-password".into();
+        editor.loaded_identity = Some(editor.identity());
+        app.editor = Some(editor);
+        click(&mut app, &ctx, "选择已生成 / 导入的密钥");
+        click(&mut app, &ctx, "test-key · ssh-ed25519");
+        let editor = app.editor.as_ref().unwrap();
+        assert_eq!(editor.profile.key_path, path.to_string_lossy());
+        assert!(editor.secret.is_empty());
+        assert!(editor.loaded_identity.is_none());
+        assert!(!editor.profile.remember_secret);
     }
 }

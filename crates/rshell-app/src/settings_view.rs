@@ -28,7 +28,7 @@ mod shortcut_tests {
     use super::*;
 
     #[test]
-    fn cli_setting_defaults_off_and_clicks_persist_in_both_themes() {
+    fn cli_and_shell_settings_clicks_persist_in_both_themes() {
         let root =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/cli-settings-tests");
         std::fs::create_dir_all(&root).unwrap();
@@ -102,6 +102,67 @@ mod shortcut_tests {
                     std::thread::sleep(Duration::from_millis(5));
                 }
                 assert_eq!(Config::load(&app.path).unwrap().cli_enabled, enabled);
+            }
+            use rshell_core::config::DefaultShell;
+            assert_eq!(
+                app.config.session_options.selected_shell(),
+                DefaultShell::Builtin
+            );
+            for (current, choice, enabled) in [
+                (
+                    DefaultShell::Builtin.label(),
+                    DefaultShell::GitBash.label(),
+                    DefaultShell::GitBash,
+                ),
+                (
+                    DefaultShell::GitBash.label(),
+                    DefaultShell::PowerShell.label(),
+                    DefaultShell::PowerShell,
+                ),
+                (
+                    DefaultShell::PowerShell.label(),
+                    DefaultShell::Builtin.label(),
+                    DefaultShell::Builtin,
+                ),
+            ] {
+                for label in [current, choice] {
+                    let output = frame(&mut app, vec![]);
+                    let pos = output
+                        .shapes
+                        .iter()
+                        .filter_map(|s| crate::composer_icons::find_text(&s.shape, label))
+                        .next_back()
+                        .unwrap()
+                        .visual_bounding_rect()
+                        .center();
+                    for pressed in [true, false] {
+                        frame(
+                            &mut app,
+                            vec![
+                                egui::Event::PointerMoved(pos),
+                                egui::Event::PointerButton {
+                                    pos,
+                                    button: egui::PointerButton::Primary,
+                                    pressed,
+                                    modifiers: egui::Modifiers::NONE,
+                                },
+                            ],
+                        );
+                    }
+                }
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while app.config.session_options.selected_shell() != enabled {
+                    app.poll_store(&ctx);
+                    assert!(Instant::now() < deadline, "{}", app.message);
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                assert_eq!(
+                    Config::load(&app.path)
+                        .unwrap()
+                        .session_options
+                        .selected_shell(),
+                    enabled
+                );
             }
         }
     }
@@ -460,7 +521,7 @@ impl App {
         ui.weak("点击键位后按新组合键。需要 Ctrl 或 Alt；Esc 取消录入。修改后自动保存。");
         ui.add_space(12.0);
         let names = [
-            "新建本地终端",
+            "新建默认 Shell",
             "关闭当前标签",
             "上一个标签",
             "下一个标签",
@@ -560,6 +621,66 @@ impl App {
         });
         ui.weak("当前版本通过同一窗口的标签页管理多个会话。");
         let mut options = self.config.session_options.clone();
+        use rshell_core::config::DefaultShell;
+        let mut selected = options.selected_shell();
+        ui.horizontal(|ui| {
+            ui.label("默认 Shell");
+            egui::ComboBox::from_id_salt("default-shell")
+                .selected_text(selected.label())
+                .show_ui(ui, |ui| {
+                    for shell in [
+                        DefaultShell::Builtin,
+                        DefaultShell::GitBash,
+                        DefaultShell::PowerShell,
+                    ] {
+                        ui.selectable_value(&mut selected, shell, shell.label());
+                    }
+                });
+        });
+        if selected != options.selected_shell() {
+            self.submit(Action::DefaultShell(selected), Pending::Update);
+        }
+        ui.weak(
+            "用于启动页、新建标签和断开后回车。内置 rubash 不依赖 Git；Git Bash 需要本机安装。",
+        );
+        if selected == DefaultShell::Builtin {
+            ui.label("程序路径：随 RShell 提供，无需配置");
+        } else {
+            let saved = if selected == DefaultShell::GitBash {
+                &options.git_bash_path
+            } else {
+                &options.powershell_path
+            };
+            let id = ui.make_persistent_id(("shell-path", selected as u8));
+            let mut path = ui
+                .data(|data| data.get_temp::<String>(id))
+                .unwrap_or_else(|| saved.clone());
+            ui.horizontal(|ui| {
+                ui.label("程序路径");
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut path)
+                        .desired_width((ui.available_width() - 160.0).max(120.0))
+                        .hint_text("未检测到，可填写程序绝对路径"),
+                );
+                if response.changed() {
+                    ui.data_mut(|data| data.insert_temp(id, path.clone()));
+                }
+                if ui.button("保存路径").clicked() {
+                    self.submit(
+                        Action::ShellPath {
+                            shell: selected,
+                            path: path.trim().to_owned(),
+                        },
+                        Pending::Update,
+                    );
+                    ui.data_mut(|data| data.remove::<String>(id));
+                }
+                if ui.button("自动检测").clicked() {
+                    self.submit(Action::DetectShellPaths { replace: true }, Pending::Update);
+                    ui.data_mut(|data| data.remove::<String>(id));
+                }
+            });
+        }
         ui.checkbox(&mut options.confirm_exit, "退出 RShell 时确认断开连接");
         ui.checkbox(&mut options.confirm_disconnect, "会话终止时确认断开连接");
         ui.checkbox(

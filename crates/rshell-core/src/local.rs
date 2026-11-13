@@ -9,12 +9,47 @@ use std::{
 };
 use tokio::sync::{mpsc, watch};
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Shell {
+    #[default]
+    System,
+    Bash,
+    Builtin,
+}
+
+impl Shell {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::System => shell_label(),
+            Self::Bash => "Git Bash",
+            Self::Builtin => "RShell 内置 Shell",
+        }
+    }
+}
+
 pub fn connect(runtime: &tokio::runtime::Handle, terminal: impl Terminal) -> Connection {
+    connect_shell(runtime, terminal, Shell::System)
+}
+
+pub fn connect_shell(
+    runtime: &tokio::runtime::Handle,
+    terminal: impl Terminal,
+    shell: Shell,
+) -> Connection {
+    connect_shell_path(runtime, terminal, shell, None)
+}
+
+pub fn connect_shell_path(
+    runtime: &tokio::runtime::Handle,
+    terminal: impl Terminal,
+    shell: Shell,
+    executable: Option<std::path::PathBuf>,
+) -> Connection {
     let (commands, rx) = mpsc::channel(64);
     let (tx, events) = mpsc::channel(16);
     let (cancel, cancelled) = watch::channel(false);
     runtime.spawn_blocking(move || {
-        let result = run(terminal, rx, cancelled, &tx);
+        let result = run(terminal, rx, cancelled, &tx, shell, executable);
         let _ = tx.blocking_send(Event::Finished(result.map_err(|e| format!("{e:#}"))));
     });
     Connection {
@@ -30,9 +65,20 @@ fn run(
     mut commands: mpsc::Receiver<Command>,
     cancelled: watch::Receiver<bool>,
     events: &mpsc::Sender<Event>,
+    shell: Shell,
+    executable: Option<std::path::PathBuf>,
 ) -> Result<()> {
     if *cancelled.borrow() {
         return Ok(());
+    }
+    let mut command = command_for(shell, executable)?;
+    let bridge = if shell == Shell::Builtin {
+        Some(crate::shell_bridge::Bridge::new()?)
+    } else {
+        None
+    };
+    if let Some(bridge) = &bridge {
+        bridge.configure(&mut command)?;
     }
     let pair = native_pty_system()
         .openpty(PtySize {
@@ -44,7 +90,6 @@ fn run(
         .context("创建本地 PTY 失败")?;
     let mut reader = pair.master.try_clone_reader()?;
     let mut writer = pair.master.take_writer()?;
-    let command = shell_command();
     let mut child = pair
         .slave
         .spawn_command(command)
@@ -80,10 +125,14 @@ fn run(
     let result = (|| -> Result<()> {
         events.blocking_send(Event::Status(format!(
             "{} 进程已启动，正在初始化命令行…（可切换或关闭标签）",
-            shell_label()
+            shell.label()
         )))?;
         #[cfg(windows)]
         let mut initial_prompt = InitialPrompt::default();
+        #[cfg(windows)]
+        let mut bash_prompt = BashPrompt::default();
+        #[cfg(windows)]
+        let started = std::time::Instant::now();
         #[cfg(windows)]
         let mut ready = false;
         #[cfg(not(windows))]
@@ -91,6 +140,13 @@ fn run(
         loop {
             if *loop_cancelled.borrow() || loop_cancelled.has_changed().is_err() {
                 return Ok(());
+            }
+            #[cfg(windows)]
+            if !ready && shell != Shell::System && started.elapsed() > Duration::from_secs(15) {
+                anyhow::bail!("Bash 启动超时：15 秒内未出现提示符");
+            }
+            if let Some(target) = bridge.as_ref().and_then(|bridge| bridge.poll()) {
+                let _ = events.try_send(Event::OpenSsh(target));
             }
             // Bound input processing so output remains responsive during pastes.
             for _ in 0..16 {
@@ -120,7 +176,12 @@ fn run(
                         writer.flush()?;
                     }
                     #[cfg(windows)]
-                    if !ready && initial_prompt.feed(&bytes) {
+                    if !ready
+                        && match shell {
+                            Shell::System => initial_prompt.feed(&bytes),
+                            Shell::Bash | Shell::Builtin => bash_prompt.feed(&bytes),
+                        }
+                    {
                         ready = true;
                         events.blocking_send(Event::Connected)?;
                     }
@@ -173,6 +234,163 @@ impl InitialPrompt {
             }
         }
         false
+    }
+}
+
+/// Match only our startup PS1 prefix, with constant memory across PTY chunks.
+#[cfg(windows)]
+#[derive(Default)]
+struct BashPrompt(usize);
+#[cfg(windows)]
+impl BashPrompt {
+    fn feed(&mut self, bytes: &[u8]) -> bool {
+        const PREFIX: &[u8] = b"RShell ";
+        for &byte in bytes {
+            if byte == PREFIX[self.0] {
+                self.0 += 1;
+                if self.0 == PREFIX.len() {
+                    self.0 = 0;
+                    return true;
+                }
+            } else {
+                self.0 = usize::from(byte == PREFIX[0]);
+            }
+        }
+        false
+    }
+}
+
+fn command_for(shell: Shell, executable: Option<std::path::PathBuf>) -> Result<CommandBuilder> {
+    if shell == Shell::Builtin {
+        let mut command = CommandBuilder::new(builtin_executable()?);
+        command.env("TERM", "xterm-256color");
+        return Ok(command);
+    }
+    if shell == Shell::System {
+        return Ok(if let Some(path) = executable {
+            let mut command = CommandBuilder::new(path);
+            command.args(["-NoLogo", "-NoProfile"]);
+            command
+        } else {
+            shell_command()
+        });
+    }
+    #[cfg(windows)]
+    let bash = executable.map(Ok).unwrap_or_else(git_bash)?;
+    #[cfg(not(windows))]
+    let bash = executable.unwrap_or_else(|| std::path::PathBuf::from("/bin/bash"));
+    let mut command = CommandBuilder::new(&bash);
+    command.args(["--noprofile", "--norc", "-i"]);
+    command.env("TERM", "xterm-256color");
+    command.env("PS1", r"RShell Bash \w\$ ");
+    command.env("HISTFILE", "");
+    command.env("HISTSIZE", "1000");
+    command.env("HISTCONTROL", "ignorespace:ignoredups");
+    #[cfg(windows)]
+    {
+        let mut root = bash
+            .parent()
+            .and_then(|p| p.parent())
+            .context("Git Bash 安装路径无效")?;
+        if root.file_name().is_some_and(|name| name == "usr") {
+            root = root.parent().context("Git Bash 安装路径无效")?;
+        }
+        let mut paths = vec![
+            root.join("usr/bin"),
+            root.join("mingw64/bin"),
+            root.join("bin"),
+        ];
+        if let Some(path) = std::env::var_os("PATH") {
+            paths.extend(std::env::split_paths(&path));
+        }
+        command.env("PATH", std::env::join_paths(paths)?);
+        command.env("MSYSTEM", "MINGW64");
+        command.env("CHERE_INVOKING", "1");
+        command.env("LANG", "en_US.UTF-8");
+    }
+    Ok(command)
+}
+
+#[cfg(windows)]
+fn git_bash() -> Result<std::path::PathBuf> {
+    // Never pick WindowsApps/bash.exe: that is a WSL alias, not Git Bash.
+    let mut roots = Vec::new();
+    for name in ["ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"] {
+        if let Some(path) = std::env::var_os(name) {
+            roots.push(std::path::PathBuf::from(path).join("Git"));
+        }
+    }
+    if let Some(path) = std::env::var_os("LOCALAPPDATA") {
+        roots.push(std::path::PathBuf::from(path).join("Programs/Git"));
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            if dir.join("git.exe").is_file()
+                && let Some(root) = dir.parent()
+            {
+                roots.push(root.to_owned());
+            }
+        }
+    }
+    roots.into_iter().map(|root| root.join("bin/bash.exe")).find(|path| path.is_file())
+        .context("未找到 Git Bash。请安装 Git for Windows（或将 Git 的 cmd 目录加入 PATH），或在设置中选择本地 PowerShell。")
+}
+
+pub fn builtin_executable() -> Result<std::path::PathBuf> {
+    let exe = std::env::current_exe()?;
+    let mut dir = exe.parent().context("无法确定程序目录")?;
+    if dir.file_name().is_some_and(|name| name == "deps") {
+        dir = dir.parent().context("无法确定构建目录")?;
+    }
+    let path = dir.join(if cfg!(windows) {
+        "rshell-shell.exe"
+    } else {
+        "rshell-shell"
+    });
+    if !path.is_file() {
+        anyhow::bail!(
+            "缺少内置 Shell 组件：{}；请使用完整 RShell 包或 cargo build -p rshell",
+            path.display()
+        );
+    }
+    Ok(path)
+}
+
+pub fn detect_path(shell: crate::config::DefaultShell) -> Option<std::path::PathBuf> {
+    use crate::config::DefaultShell;
+    match shell {
+        DefaultShell::Builtin => None,
+        DefaultShell::GitBash => {
+            #[cfg(windows)]
+            {
+                git_bash().ok()
+            }
+            #[cfg(not(windows))]
+            {
+                Some(std::path::PathBuf::from("/bin/bash")).filter(|p| p.is_file())
+            }
+        }
+        DefaultShell::PowerShell => {
+            #[cfg(windows)]
+            {
+                let mut candidates = Vec::new();
+                if let Some(root) = std::env::var_os("SystemRoot") {
+                    candidates.push(
+                        std::path::PathBuf::from(root)
+                            .join("System32/WindowsPowerShell/v1.0/powershell.exe"),
+                    );
+                }
+                if let Some(path) = std::env::var_os("PATH") {
+                    candidates
+                        .extend(std::env::split_paths(&path).map(|p| p.join("powershell.exe")));
+                }
+                candidates.into_iter().find(|p| p.is_file())
+            }
+            #[cfg(not(windows))]
+            {
+                Some(std::path::PathBuf::from("/bin/zsh")).filter(|p| p.is_file())
+            }
+        }
     }
 }
 
@@ -255,6 +473,155 @@ mod tests {
         assert!(!noisy.feed(&vec![b'x'; 100_000]));
         assert!(!noisy.in_prompt);
         assert!(noisy.feed(b"\r\nPS C:\\work> "));
+    }
+
+    #[test]
+    fn bash_prompt_matches_split_chunks_without_buffering_output() {
+        let mut prompt = BashPrompt::default();
+        assert!(!prompt.feed(&vec![b'x'; 100_000]));
+        assert!(!prompt.feed(b"RShe"));
+        assert!(prompt.feed(b"ll Bash /d/work$ "));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires installed Git for Windows; runs a real Bash PTY"]
+    async fn git_bash_full_syntax_completion_history_interrupt_and_exit() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target");
+        std::fs::create_dir_all(&root).unwrap();
+        let temp = tempfile::Builder::new()
+            .prefix("bash syntax ")
+            .tempdir_in(&root)
+            .unwrap();
+        std::fs::write(
+            temp.path().join("rshell-bash-test.sh"),
+            r#"
+items=(alpha beta)
+next() { local n=$1; printf '%s' "$((n+1))"; }
+printf '%s\n' "${items[@]}" | grep '^b' | sed 's/^b/B/' > result.txt
+for n in 1 2 3; do printf '%s\n' "$n"; done | awk '{s+=$1} END {print s}' >> result.txt
+cat <<'EOF' > heredoc.txt
+literal $HOME
+EOF
+[[ $(cat result.txt) == $'Beta\n6' ]] && [[ $(next 41) == 42 ]] || return 1
+printf 'BASH-SYNTAX=%s\n' "$(next 41)"
+printf 'UNICODE=本地终端测试\n'
+RUN=$(( ${RUN:-0} + 1 ))
+printf 'RUN=%s\n' "$RUN"
+"#,
+        )
+        .unwrap();
+        let output = Arc::new(Mutex::new(Vec::new()));
+        struct RetainedCapture(Arc<Mutex<Vec<u8>>>, Arc<Mutex<rshell_terminal::Terminal>>);
+        impl Terminal for RetainedCapture {
+            fn output(&mut self, bytes: &[u8]) -> Vec<u8> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                self.1.lock().unwrap().feed(bytes)
+            }
+            fn resize(&mut self, cols: u16, rows: u16) {
+                self.1.lock().unwrap().resize(cols, rows);
+            }
+        }
+        let terminal = Arc::new(Mutex::new(rshell_terminal::Terminal::new(100, 30)));
+        {
+            let mut terminal = terminal.lock().unwrap();
+            terminal.feed(b"retained-remote-output");
+            terminal.archive_screen();
+        }
+        let mut connection = connect_shell(
+            &tokio::runtime::Handle::current(),
+            RetainedCapture(output.clone(), terminal.clone()),
+            Shell::Bash,
+        );
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                match connection.events.recv().await.unwrap() {
+                    Event::Connected => break,
+                    Event::Finished(result) => panic!("Bash startup failed: {result:?}"),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        connection
+            .commands
+            .send(Command::Resize {
+                cols: 120,
+                rows: 36,
+            })
+            .await
+            .unwrap();
+        let cwd = temp
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .trim_start_matches(r"\\?\")
+            .replace('\\', "/")
+            .replace('\'', "'\\''");
+        connection
+            .commands
+            .send(Command::Input(
+                format!("cd '{cwd}'; source rshell-bash-test.sh\r").into_bytes(),
+            ))
+            .await
+            .unwrap();
+        until(&output, "BASH-SYNTAX=42").await;
+        until(&output, "UNICODE=本地终端测试").await;
+        until(&output, "RUN=1").await;
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("result.txt")).unwrap(),
+            "Beta\n6\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("heredoc.txt")).unwrap(),
+            "literal $HOME\n"
+        );
+        // Readline filename completion, then history Up, both submitted through the PTY.
+        connection
+            .commands
+            .send(Command::Input(b"source rshell-bas\t\r".to_vec()))
+            .await
+            .unwrap();
+        until(&output, "RUN=2").await;
+        connection
+            .commands
+            .send(Command::Input(b"\x1b[A\r".to_vec()))
+            .await
+            .unwrap();
+        until(&output, "RUN=3").await;
+        assert!(
+            terminal
+                .lock()
+                .unwrap()
+                .find("retained-remote-output", None, false)
+                .is_some()
+        );
+        connection
+            .commands
+            .send(Command::Input(b"sleep 60\r".to_vec()))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        output.lock().unwrap().clear();
+        connection
+            .commands
+            .send(Command::Input(vec![3]))
+            .await
+            .unwrap();
+        until(&output, "RShell Bash ").await;
+        connection
+            .commands
+            .send(Command::Input(b"printf 'INTERRUPT=%s\\n' OK\r".to_vec()))
+            .await
+            .unwrap();
+        until(&output, "INTERRUPT=OK").await;
+        connection
+            .commands
+            .send(Command::Input(b"exit\r".to_vec()))
+            .await
+            .unwrap();
+        finished(&mut connection).await;
     }
 
     #[tokio::test]

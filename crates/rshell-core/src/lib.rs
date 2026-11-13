@@ -30,3 +30,5 @@ pub mod user_keys;
 
 #[cfg(target_os = "macos")]
 mod macos_credentials;
+
+pub mod shell_bridge;

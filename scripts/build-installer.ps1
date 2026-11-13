@@ -20,12 +20,13 @@ try {
     $buildDirectory = if ([System.IO.Path]::IsPathRooted($TargetDirectory)) { $TargetDirectory } else { Join-Path $projectRoot $TargetDirectory }
     $exe = Join-Path $buildDirectory 'release\rshell.exe'
     $cliExe = Join-Path $buildDirectory 'release\rshell-cli.exe'
+    $shellExe = Join-Path $buildDirectory 'release\rshell-shell.exe'
     $output = Join-Path $projectRoot 'dist'
     New-Item -ItemType Directory -Path $output -Force | Out-Null
     $sdkDirectory = Join-Path $buildDirectory 'release\agent-sdk'
     $suffix = if ($WithAgent) { '-full' } else { '' }
     $sdkArguments = if ($WithAgent) { @("/DAGENT_SDK_DIR=$sdkDirectory") } else { @() }
-    & $MakensisPath @sdkArguments "/DBUNDLE_SUFFIX=$suffix" "/DAPP_VERSION=$version" "/DSOURCE_EXE=$exe" "/DSOURCE_CLI=$cliExe" "/DOUTPUT_DIR=$output" "/DPROJECT_ROOT=$projectRoot" (Join-Path $projectRoot 'packaging\windows\rshell.nsi')
+    & $MakensisPath @sdkArguments "/DBUNDLE_SUFFIX=$suffix" "/DAPP_VERSION=$version" "/DSOURCE_EXE=$exe" "/DSOURCE_CLI=$cliExe" "/DSOURCE_SHELL=$shellExe" "/DOUTPUT_DIR=$output" "/DPROJECT_ROOT=$projectRoot" (Join-Path $projectRoot 'packaging\windows\rshell.nsi')
     if ($LASTEXITCODE -ne 0) { throw "Installer compilation failed (exit $LASTEXITCODE)" }
     $installer = Join-Path $output "RShell-$version-windows-x64$suffix-setup.exe"
     if (-not (Test-Path -LiteralPath $installer)) { throw "Installer not produced: $installer" }

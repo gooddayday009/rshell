@@ -5,13 +5,18 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 Push-Location $projectRoot
 try {
     $buildDirectory = if ([System.IO.Path]::IsPathRooted($TargetDirectory)) { $TargetDirectory } else { Join-Path $projectRoot $TargetDirectory }
-    & cargo build --locked --release -p rshell --target-dir $buildDirectory
+    & cargo build --locked --release -p rshell --bins --target-dir $buildDirectory
     if ($LASTEXITCODE -ne 0) { throw "Release build failed (exit $LASTEXITCODE)" }
     if ($WithAgent) { & (Join-Path $PSScriptRoot 'build-agent-sdk.ps1') -OutputDirectory (Join-Path $buildDirectory 'release') }
     $executable = Join-Path $buildDirectory 'release\rshell.exe'
     $cliExecutable = Join-Path $buildDirectory 'release\rshell-cli.exe'
+    $shellExecutable = Join-Path $buildDirectory 'release\rshell-shell.exe'
+    foreach ($required in @($executable, $cliExecutable, $shellExecutable)) {
+        if (-not (Test-Path -LiteralPath $required)) { throw "Required executable missing: $required" }
+    }
     Write-Host "Executable: $executable"
     Write-Host "CLI: $cliExecutable"
+    Write-Host "Built-in shell: $shellExecutable"
     if ($Package) {
         $distDirectory = Join-Path $projectRoot 'dist'
         $version = [regex]::Match((Get-Content 'Cargo.toml' -Raw), '(?ms)^\[workspace\.package\]\s*.*?^version\s*=\s*"([^"]+)"').Groups[1].Value
@@ -24,6 +29,7 @@ try {
         New-Item -ItemType Directory -Path (Join-Path $bundleDirectory 'packaging\windows') -Force | Out-Null
         Copy-Item -LiteralPath $executable -Destination $bundleDirectory
         Copy-Item -LiteralPath $cliExecutable -Destination $bundleDirectory
+        Copy-Item -LiteralPath $shellExecutable -Destination $bundleDirectory
         if ($WithAgent) { Copy-Item -LiteralPath (Join-Path $buildDirectory 'release\agent-sdk') -Destination $bundleDirectory -Recurse }
         Copy-Item -LiteralPath (Join-Path $projectRoot 'README.md') -Destination $bundleDirectory
         Copy-Item -LiteralPath (Join-Path $projectRoot 'LICENSE') -Destination $bundleDirectory
@@ -38,6 +44,7 @@ try {
         Copy-Item -LiteralPath (Join-Path $projectRoot 'packaging\windows\PORTABLE.md') -Destination (Join-Path $bundleDirectory 'START-HERE.md')
         Copy-Item -LiteralPath (Join-Path $projectRoot 'crates\rshell-app\assets\fonts\LICENSE.txt') -Destination (Join-Path $bundleDirectory 'licenses\Geist-OFL.txt')
         Copy-Item -LiteralPath (Join-Path $projectRoot 'crates\rshell-app\assets\lucide\LICENSE') -Destination (Join-Path $bundleDirectory 'licenses\Lucide.txt')
+        Copy-Item -LiteralPath (Join-Path $projectRoot 'crates\rshell-app\assets\licenses\rubash-MIT.txt') -Destination (Join-Path $bundleDirectory 'licenses\rubash-MIT.txt')
         $zipPath = Join-Path $distDirectory ($bundleName + '.zip')
         Compress-Archive -LiteralPath $bundleDirectory -DestinationPath $zipPath
         $hash = Get-FileHash -LiteralPath $zipPath -Algorithm SHA256

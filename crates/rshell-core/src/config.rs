@@ -574,9 +574,32 @@ pub enum TerminalTheme {
     IdeaDark,
 }
 
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DefaultShell {
+    #[default]
+    Builtin,
+    GitBash,
+    PowerShell,
+}
+impl DefaultShell {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Builtin => "RShell 内置 Shell（rubash）",
+            Self::GitBash => "Git Bash",
+            Self::PowerShell => "本地 PowerShell",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct SessionOptions {
+    /// Legacy two-choice setting, read only when default_shell is absent.
+    pub use_powershell: bool,
+    pub default_shell: Option<DefaultShell>,
+    pub git_bash_path: String,
+    pub powershell_path: String,
     pub confirm_exit: bool,
     pub confirm_disconnect: bool,
     pub clear_scrollback_on_close: bool,
@@ -584,9 +607,23 @@ pub struct SessionOptions {
     pub remember_secret_by_default: bool,
 }
 
+impl SessionOptions {
+    pub fn selected_shell(&self) -> DefaultShell {
+        self.default_shell.unwrap_or(if self.use_powershell {
+            DefaultShell::PowerShell
+        } else {
+            DefaultShell::Builtin
+        })
+    }
+}
+
 impl Default for SessionOptions {
     fn default() -> Self {
         Self {
+            use_powershell: false,
+            default_shell: None,
+            git_bash_path: String::new(),
+            powershell_path: String::new(),
             confirm_exit: true,
             confirm_disconnect: true,
             clear_scrollback_on_close: false,
@@ -886,6 +923,12 @@ mod tests {
         let config: super::Config = serde_json::from_value(value).unwrap();
         assert_eq!(config.session_options, super::SessionOptions::default());
         assert!(config.session_options.remember_secret_by_default);
+        assert!(!config.session_options.use_powershell);
+        let mut powershell = config.clone();
+        powershell.session_options.use_powershell = true;
+        let powershell: super::Config =
+            serde_json::from_str(&serde_json::to_string(&powershell).unwrap()).unwrap();
+        assert!(powershell.session_options.use_powershell);
         let restored: super::Config =
             serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
         assert_eq!(restored.session_options, config.session_options);

@@ -9,7 +9,12 @@ default-run = "rshell"
 name = "rshell-cli"
 path = "src/cli/main.rs"
 
+[[bin]]
+name = "rshell-shell"
+path = "src/shell/main.rs"
+
 [dependencies]
+rubash = { git = "https://github.com/unixwin/rubash.git", rev = "3745712f837c6fdc55e3f1a7f01a89ab5462dd1e" }
 serde_json.workspace = true
 rshell-core = { path = "../rshell-core" }
 rshell-terminal = { path = "../rshell-terminal" }
