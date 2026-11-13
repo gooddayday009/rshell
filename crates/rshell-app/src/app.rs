@@ -542,6 +542,7 @@ fn adjacent_tab(active: usize, count: usize, direction: isize) -> usize {
 
 enum TabAction {
     New,
+    ToggleShortcut,
     Duplicate,
     Channel,
     ClearScreen,
@@ -1511,6 +1512,22 @@ impl App {
         };
         match action {
             TabAction::New => self.start_shell(ctx, None),
+            TabAction::ToggleShortcut => {
+                let id = tab.profile.id;
+                if tab.local
+                    || tab.jumpserver.is_some()
+                    || !self.config.profiles.iter().any(|profile| profile.id == id)
+                {
+                    return;
+                }
+                self.submit(
+                    Action::SetShortcut {
+                        id,
+                        enabled: !self.config.shortcut_profiles.contains(&id),
+                    },
+                    Pending::Update,
+                );
+            }
             TabAction::Duplicate => {
                 if tab.local {
                     self.start_shell(ctx, None);
@@ -3800,6 +3817,17 @@ impl eframe::App for App {
                                                             )
                                                             .on_hover_text(&tab.title);
                                                         response.context_menu(|ui| {
+                                                            let pinned = self.config.shortcut_profiles.contains(&tab.profile.id);
+                                                            let can_pin = !tab.local && tab.jumpserver.is_none()
+                                                                && self.config.profiles.iter().any(|profile| profile.id == tab.profile.id);
+                                                            if ui.add_enabled(can_pin, egui::Button::new(if pinned {
+                                                                "从快捷栏移除"
+                                                            } else {
+                                                                "添加到快捷栏"
+                                                            })).on_hover_text("将已保存的会话加入快捷栏；临时会话请先保存").clicked() {
+                                                                tab_action = Some((index, TabAction::ToggleShortcut));
+                                                                ui.close();
+                                                            }
                                                             for (label, action, enabled) in [
                                                                 (
                                                                     "新选项卡(N)    Shift+Alt+N",
@@ -4881,6 +4909,125 @@ mod tests {
                 .is_none()
         );
         assert_eq!(app.tabs.len(), count - 1);
+    }
+
+    #[test]
+    fn tab_shortcut_menu_adds_and_removes_saved_profile() {
+        use eframe::App as _;
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/shortcut-tests");
+        std::fs::create_dir_all(&root).unwrap();
+        let temp = tempfile::tempdir_in(root).unwrap();
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let profile = Profile {
+            name: "shortcut-test".into(),
+            host: "127.0.0.1".into(),
+            ..Default::default()
+        };
+        let config = Config {
+            profiles: vec![profile.clone()],
+            ..Default::default()
+        };
+        let mut app = App::new(
+            &cc,
+            config,
+            temp.path().join("config.json"),
+            runtime,
+            true,
+            false,
+        )
+        .unwrap();
+        app.tabs.clear();
+        app.tabs.push(app.configured_tab(profile.clone()));
+        app.active = 0;
+        let render = |app: &mut App, events| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(800.0, 600.0),
+                    )),
+                    events,
+                    focused: true,
+                    ..Default::default()
+                },
+                |ui| app.ui(ui, &mut eframe::Frame::_new_kittest()),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        for _ in 0..3 {
+            render(&mut app, vec![]);
+        }
+        let output = render(&mut app, vec![]);
+        let pos = output
+            .shapes
+            .iter()
+            .find_map(|s| crate::composer_icons::find_text(&s.shape, "1 shortcut-test"))
+            .unwrap()
+            .visual_bounding_rect()
+            .center();
+        for pressed in [true, false] {
+            render(
+                &mut app,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        pressed,
+                        button: egui::PointerButton::Secondary,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        let output = render(&mut app, vec![]);
+        let pos = output
+            .shapes
+            .iter()
+            .find_map(|s| crate::composer_icons::find_text(&s.shape, "添加到快捷栏"))
+            .unwrap()
+            .visual_bounding_rect()
+            .center();
+        for pressed in [true, false] {
+            render(
+                &mut app,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        pressed,
+                        button: egui::PointerButton::Primary,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !app.pending.is_empty() {
+            app.poll_store(&ctx);
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(app.config.shortcut_profiles.contains(&profile.id));
+        assert!(
+            Config::load(&temp.path().join("config.json"))
+                .unwrap()
+                .shortcut_profiles
+                .contains(&profile.id)
+        );
+        app.tab_action(0, TabAction::ToggleShortcut, &ctx);
+        while !app.pending.is_empty() {
+            app.poll_store(&ctx);
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!app.config.shortcut_profiles.contains(&profile.id));
     }
 
     #[test]

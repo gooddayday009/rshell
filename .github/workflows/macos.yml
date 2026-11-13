@@ -48,7 +48,7 @@ jobs:
           security set-keychain-settings -lut 3600 "$test_keychain"
           # Synthetic test key only: multiple test executables must read it without an ACL dialog.
           security add-generic-password -a master-key-v1 -s com.RShell.RShell.file-encryption -w "$(openssl rand -hex 16)" -A "$test_keychain"
-          bash scripts/test-macos.sh --credentials --smoke
+          bash scripts/test-macos.sh --credentials
       - name: Package
         run: bash scripts/build-macos.sh ${{ matrix.arch }}
       - uses: actions/upload-artifact@v4

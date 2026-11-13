@@ -108,6 +108,9 @@ impl Bridge {
         if !peer.ip().is_loopback() {
             return None;
         }
+        // Accepted sockets can inherit O_NONBLOCK on macOS/BSD. The bounded
+        // read below must wait for the frame, independently of listener mode.
+        stream.set_nonblocking(false).ok()?;
         stream
             .set_read_timeout(Some(Duration::from_millis(100)))
             .ok()?;
@@ -196,5 +199,42 @@ mod tests {
             client.write_all(&bytes).unwrap();
             assert_eq!(bridge.poll().is_some(), valid);
         }
+    }
+
+    #[test]
+    fn control_bridge_reads_a_frame_arriving_in_parts() {
+        let bridge = Bridge::new().unwrap();
+        let target = SshTarget {
+            host: "localhost".into(),
+            username: "test".into(),
+            port: 2222,
+        };
+        let bytes = serde_json::to_vec(&Request {
+            token: bridge.token.clone(),
+            target: target.clone(),
+        })
+        .unwrap();
+        let mut client = TcpStream::connect(bridge.listener.local_addr().unwrap()).unwrap();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(10));
+            client
+                .write_all(&(bytes.len() as u32).to_le_bytes())
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(10));
+            client.write_all(&bytes).unwrap();
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let received = loop {
+            if let Some(target) = bridge.poll() {
+                break target;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "control frame not received"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        writer.join().unwrap();
+        assert_eq!(received, target);
     }
 }

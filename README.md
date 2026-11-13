@@ -7,6 +7,8 @@ RShell 是面向 Windows x64 的原生终端与 SSH 客户端，使用 Rust 开�
 
 ## 主要功能
 
+终端标签右键菜单支持将已保存会话“添加到快捷栏”，已添加时可“从快捷栏移除”；本地终端、JumpServer 标签和未保存临时会话不适用。
+
 Windows 安装包和便携包必须同时保留 `rshell.exe`、`rshell-cli.exe` 和 `rshell-shell.exe`。内置 Shell 由同目录的 `rshell-shell.exe` 提供；出现“缺少内置 Shell 组件”时，请重新安装包含该组件的完整 RShell 安装包。
 
 Windows 内置 Shell 提示符使用本机目录格式，例如 `RShell C:\Users\Administrator\>`，切换目录后自动更新；命令仍使用内置 Shell 的 Bash 兼容语法。
