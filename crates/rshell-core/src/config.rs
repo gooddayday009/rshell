@@ -378,6 +378,7 @@ pub struct Shortcuts {
     pub next_tab_alt: KeyBinding,
     pub copy_selection: KeyBinding,
     pub search_terminal: KeyBinding,
+    pub search_sessions: KeyBinding,
 }
 
 impl Default for Shortcuts {
@@ -391,6 +392,7 @@ impl Default for Shortcuts {
             next_tab_alt: KeyBinding::new("ArrowRight", true, true, false),
             copy_selection: KeyBinding::new("C", true, false, true),
             search_terminal: KeyBinding::new("F", true, false, true),
+            search_sessions: KeyBinding::new("R", true, false, false),
         }
     }
 }
@@ -406,7 +408,7 @@ impl Shortcuts {
         }
     }
 
-    pub fn bindings(&self) -> [&KeyBinding; 8] {
+    pub fn bindings(&self) -> [&KeyBinding; 9] {
         [
             &self.new_local,
             &self.close_tab,
@@ -416,6 +418,7 @@ impl Shortcuts {
             &self.next_tab_alt,
             &self.copy_selection,
             &self.search_terminal,
+            &self.search_sessions,
         ]
     }
 
@@ -429,6 +432,7 @@ impl Shortcuts {
             5 => &mut self.next_tab_alt,
             6 => &mut self.copy_selection,
             7 => &mut self.search_terminal,
+            8 => &mut self.search_sessions,
             _ => unreachable!(),
         }
     }
@@ -480,6 +484,24 @@ mod shortcut_tests {
         let saved: Config =
             serde_json::from_str(&serde_json::to_string(&restored).unwrap()).unwrap();
         assert_eq!(saved.shortcuts, restored.shortcuts);
+    }
+
+    #[test]
+    fn session_search_defaults_for_old_settings_and_custom_binding_round_trips() {
+        let mut value = serde_json::to_value(Shortcuts::default()).unwrap();
+        value.as_object_mut().unwrap().remove("search_sessions");
+        let mut restored: Shortcuts = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            restored.search_sessions,
+            KeyBinding::new("R", true, false, false)
+        );
+        *restored.binding_mut(8) = KeyBinding::new("S", true, true, false);
+        let saved: Shortcuts =
+            serde_json::from_str(&serde_json::to_string(&restored).unwrap()).unwrap();
+        assert_eq!(restored, saved);
+        assert!(saved.valid());
+        restored.search_sessions = restored.next_tab.clone();
+        assert!(!restored.valid());
     }
 
     #[test]

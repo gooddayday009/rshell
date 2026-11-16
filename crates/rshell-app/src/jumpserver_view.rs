@@ -632,6 +632,11 @@ impl App {
         let mut connect = None;
         let mut refresh = false;
         egui::CollapsingHeader::new("JumpServer")
+            .open(if self.filter.is_empty() {
+                None
+            } else {
+                Some(true)
+            })
             .id_salt("jumpserver_root")
             .default_open(true)
             .show(ui, |ui| {
@@ -664,6 +669,7 @@ impl App {
                         .map(|o| o.name.as_str())
                         .unwrap_or(&snapshot.org_id);
                     egui::CollapsingHeader::new(org)
+                        .open(if filter.is_empty() { None } else { Some(true) })
                         .default_open(true)
                         .show(ui, |ui| {
                             if !filter.is_empty() {
@@ -677,6 +683,7 @@ impl App {
                                             asset,
                                             self.jumpserver.authenticated(),
                                             &mut connect,
+                                            &mut self.session_search,
                                         );
                                     }
                                 }
@@ -687,6 +694,7 @@ impl App {
                                     None,
                                     self.jumpserver.authenticated(),
                                     &mut connect,
+                                    &mut self.session_search,
                                     0,
                                 );
                                 let nodes: std::collections::HashSet<_> =
@@ -704,6 +712,7 @@ impl App {
                                                 asset,
                                                 self.jumpserver.authenticated(),
                                                 &mut connect,
+                                                &mut self.session_search,
                                             );
                                         }
                                     });
@@ -1130,16 +1139,28 @@ impl App {
     }
 }
 
-fn asset_row(ui: &mut egui::Ui, asset: &Asset, authenticated: bool, connect: &mut Option<Asset>) {
+fn asset_row(
+    ui: &mut egui::Ui,
+    asset: &Asset,
+    authenticated: bool,
+    connect: &mut Option<Asset>,
+    search: &mut session_tree::Search,
+) {
+    let target = session_tree::SearchTarget::Asset(asset.clone());
     let response = ui
         .add_enabled(
             authenticated && asset.is_active,
-            egui::Button::new(&asset.name).frame(false),
+            egui::Button::new(&asset.name)
+                .frame(false)
+                .selected(search.is_selected(&target)),
         )
         .on_hover_text(format!(
             "{}\n资产 ID：{}\n通过 JumpServer 连接；连接时检查 SSH 授权",
             asset.address, asset.id
         ));
+    if authenticated && asset.is_active {
+        search.row(target, &response);
+    }
     if response.double_clicked() {
         *connect = Some(asset.clone());
     }
@@ -1157,6 +1178,7 @@ fn render_nodes(
     parent: Option<&str>,
     authenticated: bool,
     connect: &mut Option<Asset>,
+    search: &mut session_tree::Search,
     depth: usize,
 ) {
     if depth >= 64 {
@@ -1177,6 +1199,7 @@ fn render_nodes(
                     Some(&node.key),
                     authenticated,
                     connect,
+                    search,
                     depth + 1,
                 );
                 for asset in snapshot
@@ -1184,7 +1207,7 @@ fn render_nodes(
                     .iter()
                     .filter(|a| a.nodes.contains(&node.id))
                 {
-                    asset_row(ui, asset, authenticated, connect);
+                    asset_row(ui, asset, authenticated, connect, search);
                 }
             });
     }

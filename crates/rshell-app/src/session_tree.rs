@@ -6,6 +6,82 @@ use rshell_core::{
     store::Action,
 };
 
+#[derive(Clone)]
+pub(super) enum SearchTarget {
+    Profile(uuid::Uuid),
+    Asset(rshell_core::jumpserver::Asset),
+}
+
+impl SearchTarget {
+    fn same(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Profile(a), Self::Profile(b)) => a == b,
+            (Self::Asset(a), Self::Asset(b)) => a.id == b.id,
+            _ => false,
+        }
+    }
+}
+
+#[derive(Default)]
+pub(super) struct Search {
+    pub selected: Option<SearchTarget>,
+    pub rows: Vec<SearchTarget>,
+    reveal: bool,
+}
+
+impl Search {
+    pub fn is_selected(&self, target: &SearchTarget) -> bool {
+        self.selected.as_ref().is_some_and(|s| s.same(target))
+    }
+
+    pub fn row(&mut self, target: SearchTarget, response: &egui::Response) {
+        if self.reveal && self.is_selected(&target) {
+            response.scroll_to_me(Some(egui::Align::Center));
+            self.reveal = false;
+        }
+        if !self.rows.iter().any(|r| r.same(&target)) {
+            self.rows.push(target);
+        }
+    }
+
+    pub fn navigate(
+        &mut self,
+        (down, up, enter, escape): (bool, bool, bool, bool),
+    ) -> Option<SearchTarget> {
+        let current = self.rows.iter().position(|r| self.is_selected(r));
+        if current.is_none() || escape {
+            self.selected = None;
+        }
+        if escape || self.rows.is_empty() {
+            return None;
+        }
+        if down || up {
+            let index = match current {
+                None => {
+                    if up {
+                        self.rows.len() - 1
+                    } else {
+                        0
+                    }
+                }
+                Some(i) => {
+                    if down {
+                        (i + 1).min(self.rows.len() - 1)
+                    } else {
+                        i.saturating_sub(1)
+                    }
+                }
+            };
+            self.selected = Some(self.rows[index].clone());
+            self.reveal = true;
+        }
+        if enter {
+            return self.selected.take().or_else(|| self.rows.first().cloned());
+        }
+        None
+    }
+}
+
 pub(super) fn folder_row(ui: &mut egui::Ui, name: &str, open: bool, zoom: f32) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), 32.0 * zoom),
@@ -360,6 +436,117 @@ mod tests {
             }
             assert_eq!(self.app.tabs.len(), 1, "drag must not connect a session");
             assert!(self.app.editor.is_none(), "drag must not prompt for login");
+        }
+    }
+
+    #[test]
+    fn search_shortcut_filters_navigates_and_opens_without_terminal_keys() {
+        use eframe::App as _;
+        for dark in [true, false] {
+            let mut h = Harness::new(dark);
+            h.app.show_sessions = false;
+            h.app.show_ai_chat = true;
+            h.app.ai_maximized = true;
+            let key = |key, modifiers| egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            };
+            let render = |h: &mut Harness, events| {
+                let mut output = h.ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(680.0, 600.0),
+                        )),
+                        focused: true,
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| h.app.ui(ui, &mut eframe::Frame::_new_kittest()),
+                );
+                output.textures_delta.clear();
+                output
+            };
+            render(&mut h, vec![]);
+            h.app.config.shortcuts.search_sessions =
+                rshell_core::config::KeyBinding::new("S", true, true, false);
+            render(&mut h, vec![key(egui::Key::R, egui::Modifiers::CTRL)]);
+            assert!(
+                !h.app.show_sessions,
+                "old binding must no longer activate search"
+            );
+            render(
+                &mut h,
+                vec![key(
+                    egui::Key::S,
+                    egui::Modifiers::CTRL | egui::Modifiers::ALT,
+                )],
+            );
+            assert!(h.app.show_sessions);
+            h.app.config.shortcuts.search_sessions =
+                rshell_core::config::Shortcuts::default().search_sessions;
+            render(&mut h, vec![key(egui::Key::R, egui::Modifiers::CTRL)]);
+            assert!(h.app.show_sessions);
+            assert!(!h.app.ai_maximized);
+            let search_id = egui::Id::unique("session_search");
+            assert!(h.ctx.memory(|m| m.has_focus(search_id)));
+            render(&mut h, vec![egui::Event::Text("keep".into())]);
+            assert_eq!(h.app.filter, "keep");
+            assert_eq!(h.app.session_search.rows.len(), 2);
+            render(
+                &mut h,
+                vec![key(egui::Key::ArrowDown, egui::Modifiers::NONE)],
+            );
+            assert!(
+                h.app
+                    .session_search
+                    .is_selected(&SearchTarget::Profile(h.app.config.profiles[0].id))
+            );
+            render(
+                &mut h,
+                vec![key(egui::Key::ArrowDown, egui::Modifiers::NONE)],
+            );
+            assert!(
+                h.app
+                    .session_search
+                    .is_selected(&SearchTarget::Profile(h.app.config.profiles[1].id))
+            );
+            render(&mut h, vec![key(egui::Key::ArrowUp, egui::Modifiers::NONE)]);
+            assert!(
+                h.app
+                    .session_search
+                    .is_selected(&SearchTarget::Profile(h.app.config.profiles[0].id))
+            );
+            render(
+                &mut h,
+                vec![key(egui::Key::ArrowDown, egui::Modifiers::NONE)],
+            );
+            render(&mut h, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+            assert_eq!(
+                h.app.editor.as_ref().unwrap().profile.id,
+                h.app.config.profiles[1].id
+            );
+            assert!(!h.ctx.memory(|m| m.has_focus(search_id)));
+            // A credential dialog must not be displaced by the global search shortcut.
+            h.app.show_sessions = false;
+            render(&mut h, vec![key(egui::Key::R, egui::Modifiers::CTRL)]);
+            assert!(!h.app.show_sessions);
+            h.app.editor = None;
+            h.app.filter.clear();
+            render(&mut h, vec![key(egui::Key::R, egui::Modifiers::CTRL)]);
+            render(&mut h, vec![egui::Event::Text("no such session".into())]);
+            render(
+                &mut h,
+                vec![key(egui::Key::ArrowDown, egui::Modifiers::NONE)],
+            );
+            render(&mut h, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
+            assert!(h.app.editor.is_none());
+            assert!(h.app.session_search.selected.is_none());
+            render(&mut h, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+            assert!(!h.ctx.memory(|m| m.has_focus(search_id)));
         }
     }
 

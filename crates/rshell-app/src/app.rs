@@ -782,6 +782,7 @@ pub struct App {
     tab_scroll_offset: f32,
     shortcut_offset: f32,
     filter: String,
+    session_search: session_tree::Search,
     sessions_zoom: f32,
     address: String,
     show_sessions: bool,
@@ -1175,6 +1176,7 @@ impl App {
             tab_scroll_offset: 0.0,
             shortcut_offset: 0.0,
             filter: String::new(),
+            session_search: Default::default(),
             sessions_zoom,
             address: String::new(),
             show_sessions: true,
@@ -2300,16 +2302,21 @@ impl App {
     }
 
     fn profile_branch(&mut self, ui: &mut egui::Ui, profile: Profile) {
-        let selected = self
-            .tabs
-            .get(self.active)
-            .is_some_and(|tab| tab.profile.id == profile.id);
+        let target = session_tree::SearchTarget::Profile(profile.id);
+        let selected = if ui.memory(|m| m.has_focus(egui::Id::unique("session_search"))) {
+            self.session_search.is_selected(&target)
+        } else {
+            self.tabs
+                .get(self.active)
+                .is_some_and(|tab| tab.profile.id == profile.id)
+        };
         let response =
             session_row(ui, &profile.name, selected, self.sessions_zoom).on_hover_text(format!(
                 "{} · {}",
                 profile.endpoint(),
                 self.config.folder_path(profile.folder_id)
             ));
+        self.session_search.row(target, &response);
         response.dnd_set_drag_payload(SessionDrag::Profile(profile.id));
         if let Some(action) = session_tree::drop_target(
             ui,
@@ -3075,7 +3082,17 @@ impl eframe::App for App {
             && self.delete.is_none()
             && self.message.is_empty()
             && !self.tabs.iter().any(|tab| tab.host_prompt.is_some());
-        if allow_terminal_input {
+        let focus_session_search =
+            allow_terminal_input && consume_shortcut(&ctx, &self.config.shortcuts.search_sessions);
+        if focus_session_search {
+            self.show_sessions = true;
+            self.ai_maximized = false;
+            self.session_search.selected = None;
+            for tab in &mut self.tabs {
+                tab.focus = false;
+            }
+        }
+        if allow_terminal_input && !focus_session_search {
             if consume_shortcut(&ctx, &self.config.shortcuts.new_local) {
                 self.start_shell(&ctx, None);
                 allow_terminal_input = false;
@@ -3535,6 +3552,8 @@ impl eframe::App for App {
             .on_hover_text("右键可隐藏或恢复界面栏")
             .context_menu(|ui| self.draw_chrome_options(ui));
         });
+        self.session_search.rows.clear();
+        let mut search_keys = (false, false, false, false);
         if self.show_sessions && !(self.show_ai_chat && self.ai_maximized) {
             egui::Panel::left("sessions")
                 .frame(
@@ -3612,6 +3631,20 @@ impl eframe::App for App {
                         });
                     });
                     ui.separator();
+                    let search_id = egui::Id::unique("session_search");
+                    if focus_session_search {
+                        ui.memory_mut(|m| m.request_focus(search_id));
+                    }
+                    if allow_terminal_input && ui.memory(|m| m.has_focus(search_id)) {
+                        search_keys = ui.input_mut(|i| {
+                            (
+                                i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown),
+                                i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp),
+                                i.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
+                                i.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
+                            )
+                        });
+                    }
                     ui.horizontal(|ui| {
                         let (rect, _) = ui.allocate_exact_size(
                             egui::vec2(12.0 * zoom, 20.0 * zoom),
@@ -3628,16 +3661,27 @@ impl eframe::App for App {
                             stroke,
                         );
                         let has_filter = !self.filter.is_empty();
-                        ui.add_sized(
+                        let search_response = ui.add_sized(
                             [
                                 ui.available_width() - if has_filter { 26.0 * zoom } else { 0.0 },
                                 25.0 * zoom,
                             ],
-                            egui::TextEdit::singleline(&mut self.filter).hint_text("搜索…"),
+                            egui::TextEdit::singleline(&mut self.filter)
+                                .id(search_id)
+                                .hint_text(format!(
+                                    "搜索… {}",
+                                    settings_view::shortcut_label(
+                                        &self.config.shortcuts.search_sessions
+                                    )
+                                )),
                         );
+                        if search_response.changed() {
+                            self.session_search.selected = None;
+                        }
                         if has_filter && ui.small_button("×").on_hover_text("清除搜索").clicked()
                         {
                             self.filter.clear();
+                            self.session_search.selected = None;
                         }
                     });
                     ui.add_space(4.0 * zoom);
@@ -3679,6 +3723,25 @@ impl eframe::App for App {
                     });
                 });
         }
+        if let Some(target) = self.session_search.navigate(search_keys) {
+            ctx.memory_mut(|m| m.surrender_focus(egui::Id::unique("session_search")));
+            match target {
+                session_tree::SearchTarget::Profile(id) => {
+                    if let Some(profile) = self.config.profiles.iter().find(|p| p.id == id).cloned()
+                    {
+                        self.open_profile(profile);
+                    }
+                }
+                session_tree::SearchTarget::Asset(asset) => self.open_jump_asset(&ctx, asset),
+            }
+            allow_terminal_input = false;
+        }
+        if search_keys.3 {
+            ctx.memory_mut(|m| m.surrender_focus(egui::Id::unique("session_search")));
+            if let Some(tab) = self.tabs.get_mut(self.active) {
+                tab.focus = true;
+            }
+        }
         self.draw_ai_chat(ui);
         let dialog_blocks_terminal = !allow_terminal_input || self.ai_command.is_some();
         restore_terminal_focus_after_dialog(
@@ -3686,6 +3749,14 @@ impl eframe::App for App {
             dialog_blocks_terminal,
             self.tabs.get_mut(self.active),
         );
+        if ctx.memory(|m| m.has_focus(egui::Id::unique("session_search"))) {
+            for tab in &mut self.tabs {
+                tab.focus = false;
+            }
+        }
+        if focus_session_search {
+            allow_terminal_input = false;
+        }
         let mut local_reopen = false;
         let mut selection_for_ai = None;
         if !(self.show_ai_chat && self.ai_maximized) {

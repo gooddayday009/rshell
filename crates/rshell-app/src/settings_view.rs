@@ -1,6 +1,6 @@
 use super::*;
 
-fn shortcut_label(binding: &rshell_core::config::KeyBinding) -> String {
+pub(super) fn shortcut_label(binding: &rshell_core::config::KeyBinding) -> String {
     let mut parts = Vec::new();
     if binding.ctrl {
         parts.push("Ctrl");
@@ -26,6 +26,110 @@ fn shortcut_label(binding: &rshell_core::config::KeyBinding) -> String {
 #[cfg(test)]
 mod shortcut_tests {
     use super::*;
+
+    #[test]
+    fn session_search_setting_captures_saves_and_restores_default() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target");
+        let temp = tempfile::tempdir_in(root).unwrap();
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut app = App::new(
+            &cc,
+            Config::default(),
+            temp.path().join("config.json"),
+            runtime,
+            true,
+            false,
+        )
+        .unwrap();
+        let frame = |app: &mut App, events| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(500.0, 640.0),
+                    )),
+                    events,
+                    focused: true,
+                    ..Default::default()
+                },
+                |ui| app.draw_shortcut_settings(ui),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let click = |app: &mut App, label: &str| {
+            frame(app, vec![]);
+            let output = frame(app, vec![]);
+            let pos = output
+                .shapes
+                .iter()
+                .find_map(|s| crate::composer_icons::find_text(&s.shape, label))
+                .unwrap()
+                .visual_bounding_rect()
+                .center();
+            for pressed in [true, false] {
+                frame(
+                    app,
+                    vec![
+                        egui::Event::PointerMoved(pos),
+                        egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                );
+            }
+        };
+        let output = frame(&mut app, vec![]);
+        assert!(
+            output
+                .shapes
+                .iter()
+                .any(|s| crate::composer_icons::find_text(&s.shape, "会话搜索").is_some())
+        );
+        click(&mut app, "Ctrl+R");
+        assert_eq!(app.shortcut_capture, Some(8));
+        frame(
+            &mut app,
+            vec![egui::Event::Key {
+                key: egui::Key::S,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::CTRL | egui::Modifiers::ALT,
+            }],
+        );
+        let wait = |app: &mut App| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !app.pending.is_empty() {
+                app.poll_store(&ctx);
+                assert!(Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(app.message.is_empty(), "{}", app.message);
+        };
+        wait(&mut app);
+        let custom = rshell_core::config::KeyBinding::new("S", true, true, false);
+        assert_eq!(app.config.shortcuts.search_sessions, custom);
+        assert_eq!(
+            Config::load(&app.path).unwrap().shortcuts.search_sessions,
+            custom
+        );
+        click(&mut app, "恢复默认快捷键");
+        wait(&mut app);
+        assert_eq!(
+            Config::load(&app.path).unwrap().shortcuts.search_sessions,
+            rshell_core::config::Shortcuts::default().search_sessions
+        );
+    }
 
     #[test]
     fn cli_and_shell_settings_clicks_persist_in_both_themes() {
@@ -529,6 +633,7 @@ impl App {
             "下一个标签（备用）",
             "复制终端选区",
             "查找终端内容",
+            "会话搜索",
         ];
         let shortcuts = self.config.shortcuts.clone();
         let bindings = shortcuts.bindings();
