@@ -5,6 +5,8 @@ RShell 是面向 Windows x64 的原生终端与 SSH 客户端，使用 Rust 开�
 <img width="1398" height="806" alt="PixPin_2026-11-03_15-35-45" src="https://github.com/user-attachments/assets/d17b3745-6815-43b0-b389-041f2d7017b8" />
 
 
+2.3.21 更新：新增可配置的会话搜索快捷键（默认 Ctrl+R），支持方向键选中会话、Enter 打开；设置入口位于「设置 → 快捷键 → 会话搜索」。
+
 ## 主要功能
 
 终端标签右键菜单支持将已保存会话“添加到快捷栏”，已添加时可“从快捷栏移除”；本地终端、JumpServer 标签和未保存临时会话不适用。
